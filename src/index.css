@@ -283,8 +283,7 @@ h1, h2, h3, h4 {
 }
 
 .step-item.completed .step-label {
-  color: var(--text-secondary);
-  text-decoration: line-through;
+  color: var(--accent);
 }
 
 @keyframes pulse-border {
@@ -727,4 +726,44 @@ h1, h2, h3, h4 {
     flex-wrap: wrap;
     gap: 0.75rem;
   }
+}
+
+/* Subtitles Overlay Styling */
+.video-subtitle-overlay {
+  position: absolute;
+  bottom: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(8, 11, 20, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 500;
+  text-align: center;
+  max-width: 85%;
+  pointer-events: none;
+  z-index: 10;
+  line-height: 1.4;
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
+  font-family: 'Inter', sans-serif;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+  animation: fadeInSubtitle 0.25s ease-out;
+}
+
+@keyframes fadeInSubtitle {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* Custom file uploader hover effect */
+label[for="manual-subtitle-file"]:hover {
+  background: rgba(255, 94, 58, 0.08) !important;
+  border-color: var(--secondary) !important;
+  color: var(--secondary) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255, 94, 58, 0.15);
 }

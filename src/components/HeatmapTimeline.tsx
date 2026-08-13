@@ -26,10 +26,14 @@ export const HeatmapTimeline: React.FC<HeatmapTimelineProps> = ({
   const paddingTop = 15;
   const chartHeight = height - paddingBottom - paddingTop;
 
-  // Format seconds to MM:SS
+  // Format seconds to MM:SS or H:MM:SS
   const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
     const s = Math.floor(secs % 60);
+    if (h > 0) {
+      return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 

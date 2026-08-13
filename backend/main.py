@@ -16,8 +16,8 @@ import logging
 import asyncio
 import json
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import yt_dlp
@@ -78,11 +78,19 @@ class AnalyzeRequest(BaseModel):
     api_key: Optional[str] = Field(None, description="Optional custom Gemini API key provided by the user")
     range_start: Optional[float] = Field(None, description="Search range start in seconds")
     range_end: Optional[float] = Field(None, description="Search range end in seconds")
+    subtitles: Optional[str] = Field(None, description="Optional manual subtitles text (SRT or TXT)")
+    subtitles_filename: Optional[str] = Field(None, description="Optional manual subtitles filename")
 
 class HeatmapPoint(BaseModel):
     start_time: float
     end_time: float
     value: float
+
+class TranscriptLine(BaseModel):
+    start: float
+    end: float
+    text: str
+    engagement: Optional[float] = None
 
 class AnalyzeResponse(BaseModel):
     video_id: str
@@ -91,10 +99,161 @@ class AnalyzeResponse(BaseModel):
     heatmap: List[HeatmapPoint]
     summary: str
     clips: List[ViralClip]
+    transcript: Optional[List[TranscriptLine]] = None
 
 # ----------------------------------------------------------------
 # Helper Functions
 # ----------------------------------------------------------------
+
+def parse_time_str(time_str: str) -> float:
+    """Parses time string in formats like HH:MM:SS,mmm or MM:SS,mmm or HH:MM:SS or MM:SS to seconds."""
+    time_str = time_str.strip().replace(',', '.')
+    # Extract millisecond if present
+    ms = 0.0
+    if '.' in time_str:
+        parts = time_str.split('.')
+        time_str = parts[0]
+        try:
+            ms = float('0.' + parts[1])
+        except ValueError:
+            pass
+            
+    time_parts = time_str.split(':')
+    try:
+        if len(time_parts) == 3:
+            return int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2]) + ms
+        elif len(time_parts) == 2:
+            return int(time_parts[0]) * 60 + int(time_parts[1]) + ms
+        elif len(time_parts) == 1:
+            return float(time_parts[0]) + ms
+    except ValueError:
+        return 0.0
+
+def parse_manual_subtitles(content: str, default_duration: float = 0.0) -> List[dict]:
+    # Normalize line endings
+    content = content.replace('\r\n', '\n').strip()
+    
+    # 1. Try standard SRT parsing first
+    # SRT block regex: index (optional), time range, text
+    # e.g.,
+    # 1
+    # 00:00:01,000 --> 00:00:04,500
+    # Hello
+    srt_regex = r'(?:\d+\n)?(\d{1,2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{3})\n(.*?)(?=\n\n|\n\d+\n|\Z)'
+    srt_matches = re.findall(srt_regex, content, re.DOTALL)
+    
+    if srt_matches:
+        results = []
+        for start_str, end_str, text in srt_matches:
+            start = parse_time_str(start_str)
+            end = parse_time_str(end_str)
+            cleaned_text = text.replace('\n', ' ').strip()
+            results.append({
+                "text": cleaned_text,
+                "start": start,
+                "duration": max(0.1, end - start)
+            })
+        if results:
+            return results
+
+    # 2. Try parsing line-by-line for timestamped lines
+    # Patterns:
+    # [00:12] Hello or 00:12 Hello
+    # [01:02:15] Hello or 01:02:15 Hello
+    # [00:12 - 00:15] Hello or 00:12 - 00:15 Hello
+    # Let's match timestamp patterns at the start of the line or enclosed in brackets/parens
+    line_time_range_regex = r'^[\[\(]?(\d{1,2}:\d{2}(?::\d{2})?(?:[,.]\d{1,3})?)\s*(?:-|-->|\s)\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[,.]\d{1,3})?)[\]\)]?\s*(.*)'
+    line_single_time_regex = r'^[\[\(]?(\d{1,2}:\d{2}(?::\d{2})?(?:[,.]\d{1,3})?)[\]\)]?\s*(.*)'
+    
+    lines = content.split('\n')
+    results = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Match range first (e.g. 00:12 - 00:15 Text)
+        m_range = re.match(line_time_range_regex, line)
+        if m_range:
+            start_str, end_str, text = m_range.groups()
+            start = parse_time_str(start_str)
+            end = parse_time_str(end_str)
+            results.append({
+                "text": text.strip(),
+                "start": start,
+                "duration": max(0.1, end - start)
+            })
+            continue
+            
+        # Match single timestamp (e.g. 00:12 Text)
+        m_single = re.match(line_single_time_regex, line)
+        if m_single:
+            start_str, text = m_single.groups()
+            start = parse_time_str(start_str)
+            results.append({
+                "text": text.strip(),
+                "start": start,
+                "duration": -1.0  # Will fill in later
+            })
+            continue
+
+    if results:
+        # Resolve duration for single timestamps
+        # Set duration to the difference between next start and current start, or a default 3.0s
+        for i in range(len(results)):
+            if results[i]["duration"] == -1.0:
+                if i < len(results) - 1:
+                    next_start = results[i+1]["start"]
+                    diff = next_start - results[i]["start"]
+                    results[i]["duration"] = max(0.5, diff)
+                else:
+                    results[i]["duration"] = 3.0  # default for the last line
+        return results
+
+    # 3. Fallback: split text into paragraphs or sentences and distribute evenly across video duration
+    duration_to_use = default_duration if default_duration > 0 else 60.0
+    # Clean multiple newlines and split by sentences
+    sentences = re.split(r'(?<=[.!?])\s+|\n+', content)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if sentences:
+        num_sentences = len(sentences)
+        sec_per_sentence = duration_to_use / num_sentences
+        results = []
+        for i, text in enumerate(sentences):
+            start = i * sec_per_sentence
+            results.append({
+                "text": text,
+                "start": round(start, 2),
+                "duration": round(sec_per_sentence, 2)
+            })
+        return results
+        
+    return []
+
+def format_to_srt(lines: List[dict]) -> str:
+    srt_output = []
+    for idx, line in enumerate(lines):
+        start = line["start"]
+        end = start + line.get("duration", 3.0)
+        
+        # Convert seconds to HH:MM:SS,mmm
+        def to_srt_time(seconds: float) -> str:
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            ms = int(round((seconds % 1) * 1000))
+            if ms == 1000:
+                s += 1
+                ms = 0
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+            
+        srt_output.append(f"{idx + 1}")
+        srt_output.append(f"{to_srt_time(start)} --> {to_srt_time(end)}")
+        srt_output.append(line["text"])
+        srt_output.append("")
+    return "\n".join(srt_output)
 
 def extract_video_id(url: str) -> Optional[str]:
     """Extracts the 11-character YouTube video ID from various URL formats."""
@@ -220,6 +379,12 @@ def fetch_transcript(video_id: str) -> List[dict]:
 
 
 
+def lowercase_hashtags_in_string(text: str) -> str:
+    """Finds all hashtags (#word) in a string and converts them to lowercase."""
+    if not text:
+        return text
+    return re.sub(r'#\w+', lambda m: m.group(0).lower(), text)
+
 def get_average_heatmap_value(start: float, end: float, heatmap: List[dict]) -> float:
     """Calculates the average retention score from the heatmap for a transcript time segment."""
     if not heatmap:
@@ -261,6 +426,168 @@ def _sse(data: dict) -> str:
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "message": "CHEAT CLIP API is active"}
+
+@app.get("/api/download")
+def download_video(video_id: str, background_tasks: BackgroundTasks, title: Optional[str] = None):
+    """Retrieves video download (minimum 1080p, preferring highest resolution) and streams/forces download.
+    Falls back to 360p direct streaming if high-quality download or merge fails.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    proxy_url = os.environ.get("YOUTUBE_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+    
+    # 1. Attempt High-Quality Download & Merge
+    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    ydl_opts_hq = {
+        'format': 'bestvideo[height>=1080]+bestaudio/bestvideo+bestaudio/best',
+        'merge_output_format': 'mp4',
+        'outtmpl': os.path.join(temp_dir, f"{video_id}_%(ext)s"),
+        'remote_components': 'ejs:github',
+        'quiet': True,
+        'no_warnings': True,
+    }
+    if proxy_url:
+        ydl_opts_hq['proxy'] = proxy_url
+        
+    try:
+        logger.info(f"Attempting high-quality download/merge for video_id: {video_id}")
+        with yt_dlp.YoutubeDL(ydl_opts_hq) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            base, _ = os.path.splitext(filename)
+            final_filepath = base + ".mp4"
+            
+            if not os.path.exists(final_filepath):
+                # Fallback if it downloaded with another extension
+                final_filepath = filename
+                
+            if not os.path.exists(final_filepath):
+                raise Exception("Downloaded merged video file not found on disk")
+                
+            # Extract and sanitize video title
+            video_title = title or info.get('title') or f"video_{video_id}"
+            safe_title = re.sub(r'[\x00-\x1f\\/*?:"<>|]', '_', video_title)
+            safe_title = re.sub(r'\s+', ' ', safe_title).strip()
+            download_filename = f"{safe_title}.mp4"
+            
+            srt_filepath = os.path.join(temp_dir, f"{video_id}.srt")
+            files_to_remove = [final_filepath]
+            
+            if os.path.exists(srt_filepath):
+                logger.info(f"Subtitles file found for {video_id}. Muxing into output...")
+                muxed_filepath = base + "_subbed.mp4"
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-i', final_filepath,
+                    '-i', srt_filepath,
+                    '-c', 'copy',
+                    '-c:s', 'mov_text',
+                    muxed_filepath
+                ]
+                import subprocess
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0 and os.path.exists(muxed_filepath):
+                    final_filepath = muxed_filepath
+                    files_to_remove.append(muxed_filepath)
+                    logger.info("Subtitles muxed successfully into output MP4!")
+                else:
+                    logger.error(f"FFmpeg subtitle muxing failed: {result.stderr}")
+            
+            def remove_files(paths: List[str]):
+                for path in paths:
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                            logger.info(f"Successfully cleaned up temporary download file: {path}")
+                        except Exception as delete_err:
+                            logger.error(f"Failed to delete temporary file {path}: {delete_err}")
+            
+            background_tasks.add_task(remove_files, files_to_remove)
+            
+            logger.info(f"Serving high-quality file response for {video_id}: {final_filepath}")
+            return FileResponse(
+                final_filepath,
+                media_type="video/mp4",
+                filename=download_filename
+            )
+            
+    except Exception as hq_err:
+        logger.error(f"High-quality download failed for {video_id}: {hq_err}. Falling back to 360p direct streaming.")
+        
+        # 2. Fallback to 360p direct streaming
+        ydl_opts_fallback = {
+            'format': 'best',
+            'quiet': True,
+            'no_warnings': True,
+        }
+        if proxy_url:
+            ydl_opts_fallback['proxy'] = proxy_url
+            
+        with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+            try:
+                info = ydl.extract_info(url, download=False)
+                formats = info.get('formats', [])
+                best_url = None
+                ext = 'mp4'
+                
+                # Search in reverse to find the highest quality combined format (audio + video)
+                for f in reversed(formats):
+                    if f.get('acodec') != 'none' and f.get('vcodec') != 'none' and f.get('url'):
+                        if f.get('url').startswith('https'):
+                            best_url = f.get('url')
+                            ext = f.get('ext') or 'mp4'
+                            break
+                if not best_url:
+                    best_url = info.get('url')
+                    ext = info.get('ext') or 'mp4'
+                    
+                if not best_url:
+                    raise Exception("Could not resolve format url")
+                    
+                video_title = title or info.get('title') or f"video_{video_id}"
+                safe_title = re.sub(r'[\x00-\x1f\\/*?:"<>|]', '_', video_title)
+                safe_title = re.sub(r'\s+', ' ', safe_title).strip()
+                filename = f"{safe_title}.{ext}"
+                
+                import urllib.request
+                import urllib.parse
+                
+                def stream_file():
+                    req = urllib.request.Request(
+                        best_url,
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        }
+                    )
+                    try:
+                        with urllib.request.urlopen(req) as response:
+                            while True:
+                                chunk = response.read(128 * 1024)
+                                if not chunk:
+                                    break
+                                yield chunk
+                    except Exception as stream_err:
+                        logger.error(f"Error during video streaming chunk transfer: {stream_err}")
+                
+                encoded_filename = urllib.parse.quote(filename)
+                ascii_filename = re.sub(r'[^\x00-\x7F]+', '_', filename)
+                ascii_filename = ascii_filename.replace('"', '_').replace("'", "_")
+                content_disposition = f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{encoded_filename}'
+                
+                media_type = f"video/{ext}" if ext in ['mp4', 'webm', 'ogg'] else "application/octet-stream"
+                
+                return StreamingResponse(
+                    stream_file(),
+                    media_type=media_type,
+                    headers={
+                        "Content-Disposition": content_disposition,
+                        "Accept-Ranges": "bytes"
+                    }
+                )
+            except Exception as fallback_err:
+                logger.error(f"yt-dlp fallback direct url resolution failed: {fallback_err}. Redirecting to helper service.")
+                return RedirectResponse(url=f"https://www.youtubepp.com/watch?v={video_id}")
 
 @app.post("/api/analyze")
 async def analyze_video(request: AnalyzeRequest):
@@ -308,34 +635,56 @@ async def analyze_video(request: AnalyzeRequest):
             yield _sse({"step": 2, "message": "No heatmap available for this video — will rely on transcript content analysis."})
 
         # ── Step 3: Transcript ───────────────────────────────────────────────
-        yield _sse({"step": 3, "message": "Fetching subtitles — trying video's original language..."})
-
-        try:
-            transcript_lines = await asyncio.to_thread(fetch_transcript, video_id)
-            yield _sse({"step": 3, "message": f"Subtitles loaded — {len(transcript_lines)} lines parsed successfully."})
-        except Exception as e:
-            if is_mock:
-                transcript_lines = [
-                    {"text": "Hello and welcome to this video.",            "start":  0.0, "duration": 3.0},
-                    {"text": "Today we are looking at how this app works.",  "start":  3.0, "duration": 4.0},
-                    {"text": "It finds viral hotspots and highlights them.",  "start":  7.0, "duration": 4.0},
-                    {"text": "Most people think it's magic.",               "start": 11.0, "duration": 3.0},
-                    {"text": "But it uses YouTube player heatmaps.",         "start": 14.0, "duration": 4.0},
-                    {"text": "And processes them with Gemini AI models.",    "start": 18.0, "duration": 4.0},
-                    {"text": "This is changing how editors crop videos.",    "start": 22.0, "duration": 5.0},
-                    {"text": "If you want to grow on TikTok, try it.",      "start": 27.0, "duration": 5.0},
-                    {"text": "We will explore the code next.",               "start": 32.0, "duration": 3.0},
-                ]
-                yield _sse({"step": 3, "message": "Mock mode — using sample transcript."})
-            else:
-                msg = e.detail if isinstance(e, HTTPException) else str(e)
-                yield _sse({"error": msg, "status": 400})
+        if request.subtitles:
+            yield _sse({"step": 3, "message": "Parsing manual subtitles..."})
+            try:
+                transcript_lines = parse_manual_subtitles(request.subtitles, duration)
+                if not transcript_lines:
+                    raise Exception("Custom subtitles parsed into empty array.")
+                yield _sse({"step": 3, "message": f"Custom subtitles parsed — {len(transcript_lines)} lines loaded successfully."})
+            except Exception as e:
+                yield _sse({"error": f"Failed to parse manual subtitles: {str(e)}", "status": 400})
                 return
+        else:
+            yield _sse({"step": 3, "message": "Fetching subtitles — trying video's original language..."})
+            try:
+                transcript_lines = await asyncio.to_thread(fetch_transcript, video_id)
+                yield _sse({"step": 3, "message": f"Subtitles loaded — {len(transcript_lines)} lines parsed successfully."})
+            except Exception as e:
+                if is_mock:
+                    transcript_lines = [
+                        {"text": "Hello and welcome to this video.",            "start":  0.0, "duration": 3.0},
+                        {"text": "Today we are looking at how this app works.",  "start":  3.0, "duration": 4.0},
+                        {"text": "It finds viral hotspots and highlights them.",  "start":  7.0, "duration": 4.0},
+                        {"text": "Most people think it's magic.",               "start": 11.0, "duration": 3.0},
+                        {"text": "But it uses YouTube player heatmaps.",         "start": 14.0, "duration": 4.0},
+                        {"text": "And processes them with Gemini AI models.",    "start": 18.0, "duration": 4.0},
+                        {"text": "This is changing how editors crop videos.",    "start": 22.0, "duration": 5.0},
+                        {"text": "If you want to grow on TikTok, try it.",      "start": 27.0, "duration": 5.0},
+                        {"text": "We will explore the code next.",               "start": 32.0, "duration": 3.0},
+                    ]
+                    yield _sse({"step": 3, "message": "Mock mode — using sample transcript."})
+                else:
+                    msg = e.detail if isinstance(e, HTTPException) else str(e)
+                    yield _sse({"error": msg, "status": 400})
+                    return
 
         # Estimate duration from transcript if missing
         if duration == 0.0 and transcript_lines:
             last = transcript_lines[-1]
             duration = last.get("start", 0.0) + last.get("duration", 0.0)
+
+        # Save subtitles to temp_downloads for possible video downloads muxing
+        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
+        os.makedirs(temp_dir, exist_ok=True)
+        srt_filepath = os.path.join(temp_dir, f"{video_id}.srt")
+        try:
+            srt_content = format_to_srt(transcript_lines)
+            with open(srt_filepath, "w", encoding="utf-8") as f_srt:
+                f_srt.write(srt_content)
+            logger.info(f"Subtitles saved to temp cache: {srt_filepath}")
+        except Exception as srt_err:
+            logger.error(f"Failed to save temporary subtitles: {srt_err}")
 
         # Slice transcript based on custom search range if provided
         start_bound = 0.0
@@ -574,6 +923,11 @@ async def analyze_video(request: AnalyzeRequest):
                 for line in enriched_transcript
                 if max(line.get("start", 0.0), start) < min(line.get("end", 0.0), end)
             ]
+            
+            # Ensure hashtags are always lowercase
+            caption_sug = lowercase_hashtags_in_string(raw_clip.get('caption_suggestion', ''))
+            hashtag_sug = lowercase_hashtags_in_string(raw_clip.get('hashtag_suggestion', ''))
+            
             final_clips.append(ViralClip(
                 title=raw_clip.get('title', ''),
                 start_time=start,
@@ -582,8 +936,8 @@ async def analyze_video(request: AnalyzeRequest):
                 key_quotes=raw_clip.get('key_quotes') or [],
                 transcript=" ".join(clip_lines),
                 title_suggestion=raw_clip.get('title_suggestion', ''),
-                caption_suggestion=raw_clip.get('caption_suggestion', ''),
-                hashtag_suggestion=raw_clip.get('hashtag_suggestion', '')
+                caption_suggestion=caption_sug,
+                hashtag_suggestion=hashtag_sug
             ))
 
         response_heatmap = [
@@ -595,13 +949,27 @@ async def analyze_video(request: AnalyzeRequest):
             for pt in (heatmap or [])
         ]
 
+        response_transcript = [
+            TranscriptLine(
+                start=float(line["start"]),
+                end=float(line["end"]),
+                text=line["text"],
+                engagement=line.get("engagement")
+            )
+            for line in enriched_transcript
+        ]
+
+        # Ensure hashtags are lowercase in the overall summary
+        clean_summary = lowercase_hashtags_in_string(analysis_data.get("summary", ""))
+
         final_result = AnalyzeResponse(
             video_id=video_id,
             title=title,
             duration=duration,
             heatmap=response_heatmap,
-            summary=analysis_data.get("summary", ""),
-            clips=final_clips
+            summary=clean_summary,
+            clips=final_clips,
+            transcript=response_transcript
         )
 
         yield _sse({"done": True, "result": final_result.model_dump()})

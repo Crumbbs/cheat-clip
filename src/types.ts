@@ -4,6 +4,13 @@ export interface HeatmapPoint {
   value: number;
 }
 
+export interface TranscriptLine {
+  start: number;
+  end: number;
+  text: string;
+  engagement?: number;
+}
+
 export interface ViralClip {
   title: string;
   start_time: number;
@@ -23,4 +30,5 @@ export interface AnalyzeResponse {
   heatmap: HeatmapPoint[];
   summary: string;
   clips: ViralClip[];
+  transcript?: TranscriptLine[];
 }

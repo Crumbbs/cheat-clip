@@ -21,6 +21,11 @@ export default function App() {
   const [customRangeStart, setCustomRangeStart] = useState<string>('');
   const [customRangeEnd, setCustomRangeEnd] = useState<string>('');
 
+  // Manual subtitles states
+  const [subtitlesSource, setSubtitlesSource] = useState<'youtube' | 'manual'>('youtube');
+  const [manualSubtitlesContent, setManualSubtitlesContent] = useState<string>('');
+  const [manualSubtitlesFileName, setManualSubtitlesFileName] = useState<string>('');
+
   const parseTimeToSeconds = (val: string): number | null => {
     const clean = val.trim();
     if (!clean) return null;
@@ -53,9 +58,35 @@ export default function App() {
   const [activeClip, setActiveClip] = useState<ViralClip | null>(null);
   const [expandedClipIndex, setExpandedClipIndex] = useState<number | null>(null);
 
+  const leftPanelRef = useRef<HTMLDivElement>(null);
+  const [leftPanelHeight, setLeftPanelHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!result) return;
+    const updateHeight = () => {
+      if (leftPanelRef.current) {
+        setLeftPanelHeight(leftPanelRef.current.clientHeight);
+      }
+    };
+
+    updateHeight();
+    window.addEventListener('resize', updateHeight);
+
+    const observer = new ResizeObserver(updateHeight);
+    if (leftPanelRef.current) {
+      observer.observe(leftPanelRef.current);
+    }
+
+    return () => {
+      window.removeEventListener('resize', updateHeight);
+      observer.disconnect();
+    };
+  }, [result, activeClip, expandedClipIndex]);
+
   // Search & Filtering States
   const [searchQuery, setSearchQuery] = useState('');
-  const [viralityFilter, setViralityFilter] = useState<'all' | 'high' | 'medium'>('all');
+  const [viralityFilter, setViralityFilter] = useState<'all' | 'high' | 'medium' | 'marked'>('all');
+  const [sortBy, setSortBy] = useState<'virality' | 'time' | 'duration' | 'marked'>('virality');
 
   // Assistance feature: Checklist for marked clips
   const [markedClips, setMarkedClips] = useState<Record<string, boolean>>({});
@@ -128,6 +159,11 @@ export default function App() {
     }
   }, [result]);
 
+  // Clear expanded clip index when filters or sorting change
+  useEffect(() => {
+    setExpandedClipIndex(null);
+  }, [sortBy, viralityFilter, searchQuery]);
+
   const toggleMarkedClip = (clipId: string) => {
     if (!result?.video_id) return;
     const updated = {
@@ -153,17 +189,22 @@ export default function App() {
           let video_id = '';
           let range_suffix = '';
 
-          if (key.includes('_range_')) {
-            const rangeIndex = key.indexOf('_range_');
-            range_suffix = key.substring(rangeIndex); // e.g., "_range_1740_1875"
-            const baseKey = key.substring(0, rangeIndex); // e.g., "cheat_clip_cache_dQw4w9WgXcQ_30s"
+          const isManual = key.endsWith('_manual');
+          const cleanKey = isManual ? key.slice(0, -7) : key;
+
+          if (cleanKey.includes('_range_')) {
+            const rangeIndex = cleanKey.indexOf('_range_');
+            range_suffix = cleanKey.substring(rangeIndex); // e.g., "_range_1740_1875"
+            if (isManual) range_suffix += '_manual';
+            const baseKey = cleanKey.substring(0, rangeIndex); // e.g., "cheat_clip_cache_dQw4w9WgXcQ_30s"
             const parts = baseKey.replace('cheat_clip_cache_', '').split('_');
             duration_pref = parts[parts.length - 1];
             video_id = parts.slice(0, parts.length - 1).join('_');
           } else {
-            const parts = key.replace('cheat_clip_cache_', '').split('_');
+            const parts = cleanKey.replace('cheat_clip_cache_', '').split('_');
             duration_pref = parts[parts.length - 1];
             video_id = parts.slice(0, parts.length - 1).join('_');
+            if (isManual) range_suffix = '_manual';
           }
 
           // Try reading cached timestamp stored separately
@@ -204,15 +245,29 @@ export default function App() {
       setUrl(`https://www.youtube.com/watch?v=${entry.video_id}`);
       setDurationPref(entry.duration_pref as '30s' | '60s' | '1m+');
 
+      // Restore subtitle source state
+      if (entry.range_suffix?.includes('_manual')) {
+        setSubtitlesSource('manual');
+      } else {
+        setSubtitlesSource('youtube');
+      }
+
       // Restore range inputs if they were custom
       if (entry.range_suffix) {
-        setRangeType('custom');
-        const parts = entry.range_suffix.split('_'); // ["", "range", "start", "end"]
-        const startVal = parts[2];
-        const endVal = parts[3];
+        const cleanRangeSuffix = entry.range_suffix.replace('_manual', '');
+        if (cleanRangeSuffix.includes('_range_')) {
+          setRangeType('custom');
+          const parts = cleanRangeSuffix.split('_'); // ["", "range", "start", "end"]
+          const startVal = parts[2];
+          const endVal = parts[3];
 
-        setCustomRangeStart(startVal !== '0' ? formatSeconds(Number(startVal)) : '');
-        setCustomRangeEnd(endVal !== 'end' ? formatSeconds(Number(endVal)) : '');
+          setCustomRangeStart(startVal !== '0' ? formatSeconds(Number(startVal)) : '');
+          setCustomRangeEnd(endVal !== 'end' ? formatSeconds(Number(endVal)) : '');
+        } else {
+          setRangeType('entire');
+          setCustomRangeStart('');
+          setCustomRangeEnd('');
+        }
       } else {
         setRangeType('entire');
         setCustomRangeStart('');
@@ -495,12 +550,18 @@ export default function App() {
       }
     }
 
+    if (subtitlesSource === 'manual' && !manualSubtitlesContent.trim()) {
+      setError('Please choose or drag-and-drop a custom subtitle file (.srt or .txt).');
+      return;
+    }
+
     // Check localStorage cache first to avoid redundant API/Gemini processing
     const videoId = extractVideoId(url);
     const rangeSuffix = (rangeStartSecs !== undefined || rangeEndSecs !== undefined)
       ? `_range_${rangeStartSecs ?? 0}_${rangeEndSecs ?? 'end'}`
       : '';
-    const cacheKey = videoId ? `cheat_clip_cache_${videoId}_${durationPref}${rangeSuffix}` : null;
+    const manualSuffix = subtitlesSource === 'manual' ? '_manual' : '';
+    const cacheKey = videoId ? `cheat_clip_cache_${videoId}_${durationPref}${rangeSuffix}${manualSuffix}` : null;
 
     if (cacheKey) {
       const cachedData = localStorage.getItem(cacheKey);
@@ -521,7 +582,7 @@ export default function App() {
           setLoadingDetails('Loading cached audience interest heatmap points...');
           await new Promise(r => setTimeout(r, 400));
           setCurrentStep(3);
-          setLoadingDetails('Loading native subtitles and transcript...');
+          setLoadingDetails(subtitlesSource === 'manual' ? 'Loading manual subtitles and transcript...' : 'Loading native subtitles and transcript...');
           await new Promise(r => setTimeout(r, 400));
           setCurrentStep(4);
           setLoadingDetails('Reconstructing viral hotspots...');
@@ -566,6 +627,8 @@ export default function App() {
           api_key: apiKey.trim() || undefined,
           range_start: rangeStartSecs,
           range_end: rangeEndSecs,
+          subtitles: subtitlesSource === 'manual' ? manualSubtitlesContent : undefined,
+          subtitles_filename: subtitlesSource === 'manual' ? manualSubtitlesFileName : undefined,
         }),
       });
 
@@ -610,8 +673,8 @@ export default function App() {
 
       // Cache the successful response
       if (resultData.video_id) {
-        const targetCacheKey = `cheat_clip_cache_${resultData.video_id}_${durationPref}${rangeSuffix}`;
-        const tsKey = `cheat_clip_ts_${resultData.video_id}_${durationPref}${rangeSuffix}`;
+        const targetCacheKey = `cheat_clip_cache_${resultData.video_id}_${durationPref}${rangeSuffix}${manualSuffix}`;
+        const tsKey = `cheat_clip_ts_${resultData.video_id}_${durationPref}${rangeSuffix}${manualSuffix}`;
         localStorage.setItem(targetCacheKey, JSON.stringify(resultData));
         localStorage.setItem(tsKey, new Date().toISOString());
         refreshHistory();
@@ -630,37 +693,21 @@ export default function App() {
   };
 
   const formatSeconds = (secs: number) => {
-    const m = Math.floor(secs / 60);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
     const s = Math.floor(secs % 60);
+    if (h > 0) {
+      return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
-  const renderSummaryWithHighlights = (summary: string) => {
-    if (!summary) return null;
-    const parts = summary.split(/(#\w+)/g);
-    return parts.map((part, idx) => {
-      if (part.startsWith('#')) {
-        return (
-          <span
-            key={idx}
-            className="summary-hashtag-highlight"
-            style={{
-              color: 'var(--primary)',
-              fontWeight: '600',
-              background: 'rgba(168, 85, 247, 0.1)',
-              padding: '2px 6px',
-              borderRadius: '4px',
-              margin: '0 2px',
-              border: '1px solid rgba(168, 85, 247, 0.2)',
-              display: 'inline-block'
-            }}
-          >
-            {part}
-          </span>
-        );
-      }
-      return part;
-    });
+  const extractHashtagsAndText = (summary: string) => {
+    if (!summary) return { text: '', hashtags: [] as string[] };
+    const hashtagRegex = /#\w+/g;
+    const hashtags = (summary.match(hashtagRegex) || []).map(tag => tag.toLowerCase());
+    const text = summary.replace(hashtagRegex, '').replace(/\s+/g, ' ').trim();
+    return { text, hashtags };
   };
 
   const handleCopyText = (text: string, label: string) => {
@@ -670,6 +717,12 @@ export default function App() {
         setToastMessage(null);
       }, 3000);
     });
+  };
+
+  const handleRefreshPlayer = () => {
+    if (result) {
+      initPlayer(result.video_id, true);
+    }
   };
 
   const handleCopyClip = (clip: ViralClip, e: React.MouseEvent) => {
@@ -689,9 +742,10 @@ Transcript:
     }
     if (clip.caption_suggestion) {
       const captionText = (() => {
-        if (!clip.hashtag_suggestion) return clip.caption_suggestion;
-        if (clip.caption_suggestion.includes(clip.hashtag_suggestion)) return clip.caption_suggestion;
-        return `${clip.caption_suggestion} ${clip.hashtag_suggestion}`;
+        const lowercaseHashtags = (clip.hashtag_suggestion || '').toLowerCase();
+        if (!lowercaseHashtags) return clip.caption_suggestion;
+        if (clip.caption_suggestion.toLowerCase().includes(lowercaseHashtags)) return clip.caption_suggestion;
+        return `${clip.caption_suggestion} ${lowercaseHashtags}`;
       })();
       copyText += `\n\nCaption Suggestion: ${captionText}`;
     }
@@ -718,6 +772,40 @@ Transcript:
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  const handleExportSRT = () => {
+    if (!result || !result.transcript) {
+      setToastMessage("No transcript available to export.");
+      setTimeout(() => setToastMessage(null), 3000);
+      return;
+    }
+    
+    const formatSRTTime = (secs: number): string => {
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      const s = Math.floor(secs % 60);
+      const ms = Math.floor((secs % 1) * 1000);
+      return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')},${ms.toString().padStart(3, '0')}`;
+    };
+
+    let srtText = '';
+    result.transcript.forEach((line, index) => {
+      srtText += `${index + 1}\n`;
+      srtText += `${formatSRTTime(line.start)} --> ${formatSRTTime(line.end)}\n`;
+      srtText += `${line.text}\n\n`;
+    });
+
+    const dataStr = "data:text/plain;charset=utf-8," + encodeURIComponent(srtText);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `cheat_clip_${result.video_id}.srt`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+
+    setToastMessage("Downloaded subtitles as SRT successfully!");
+    setTimeout(() => setToastMessage(null), 3000);
+  };
+
   const handleCopyAllMarkdown = () => {
     if (!result) return;
     let md = `# Viral Clips from "${result.title}"\n\n`;
@@ -734,9 +822,10 @@ Transcript:
       }
       if (clip.caption_suggestion) {
         const captionText = (() => {
-          if (!clip.hashtag_suggestion) return clip.caption_suggestion;
-          if (clip.caption_suggestion.includes(clip.hashtag_suggestion)) return clip.caption_suggestion;
-          return `${clip.caption_suggestion} ${clip.hashtag_suggestion}`;
+          const lowercaseHashtags = (clip.hashtag_suggestion || '').toLowerCase();
+          if (!lowercaseHashtags) return clip.caption_suggestion;
+          if (clip.caption_suggestion.toLowerCase().includes(lowercaseHashtags)) return clip.caption_suggestion;
+          return `${clip.caption_suggestion} ${lowercaseHashtags}`;
         })();
         md += `- **Caption Suggestion**: ${captionText}\n`;
       }
@@ -757,10 +846,34 @@ Transcript:
 
     const matchesVirality = viralityFilter === 'all' ||
       (viralityFilter === 'high' && clip.virality_score >= 90) ||
-      (viralityFilter === 'medium' && clip.virality_score < 90);
+      (viralityFilter === 'medium' && clip.virality_score < 90) ||
+      (viralityFilter === 'marked' && !!markedClips[`${clip.start_time}_${clip.end_time}`]);
 
     return matchesSearch && matchesVirality;
   }) || [];
+
+  // Sort the filtered clips based on selected sortBy
+  const sortedClips = [...filteredClips].sort((a, b) => {
+    if (sortBy === 'virality') {
+      return b.virality_score - a.virality_score;
+    } else if (sortBy === 'time') {
+      return a.start_time - b.start_time;
+    } else if (sortBy === 'duration') {
+      return (b.end_time - b.start_time) - (a.end_time - a.start_time);
+    } else if (sortBy === 'marked') {
+      const aMarked = !!markedClips[`${a.start_time}_${a.end_time}`];
+      const bMarked = !!markedClips[`${b.start_time}_${b.end_time}`];
+      if (aMarked && !bMarked) return -1;
+      if (!aMarked && bMarked) return 1;
+      return b.virality_score - a.virality_score;
+    }
+    return 0;
+  });
+
+  // Find current subtitle line
+  const currentSubtitle = result?.transcript?.find(
+    line => currentTime >= line.start && currentTime <= line.end
+  );
 
   return (
     <div className="app-container">
@@ -923,6 +1036,85 @@ Transcript:
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
                   Required — your key is saved locally in your browser and never sent to our servers.
                 </span>
+              )}
+            </div>
+          </div>
+
+          {/* Subtitles Source Section */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', borderTop: '1px solid var(--border-color)', paddingTop: '1.25rem', marginTop: '0.5rem' }}>
+            <label style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Subtitles Source</label>
+            <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer' }}>
+                <input
+                  type="radio"
+                  name="subtitlesSource"
+                  checked={subtitlesSource === 'youtube'}
+                  onChange={() => setSubtitlesSource('youtube')}
+                  style={{ accentColor: 'var(--primary)' }}
+                  disabled={loading}
+                />
+                Auto-fetch from YouTube
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer' }}>
+                <input
+                  type="radio"
+                  name="subtitlesSource"
+                  checked={subtitlesSource === 'manual'}
+                  onChange={() => setSubtitlesSource('manual')}
+                  style={{ accentColor: 'var(--primary)' }}
+                  disabled={loading}
+                />
+                Upload Custom Subtitles (.srt, .txt)
+              </label>
+
+              {subtitlesSource === 'manual' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <input
+                    type="file"
+                    accept=".srt,.txt"
+                    id="manual-subtitle-file"
+                    style={{ display: 'none' }}
+                    disabled={loading}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setManualSubtitlesFileName(file.name);
+                      const reader = new FileReader();
+                      reader.onload = (evt) => {
+                        const text = evt.target?.result as string;
+                        setManualSubtitlesContent(text);
+                        setToastMessage(`Loaded: ${file.name}`);
+                        setTimeout(() => setToastMessage(null), 3000);
+                      };
+                      reader.readAsText(file);
+                    }}
+                  />
+                  <label
+                    htmlFor="manual-subtitle-file"
+                    className="form-input"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.5rem',
+                      padding: '0.5rem 1rem',
+                      cursor: 'pointer',
+                      background: 'rgba(255, 255, 255, 0.05)',
+                      border: '1px solid var(--border-color)',
+                      borderRadius: '8px',
+                      fontSize: '0.85rem',
+                      width: 'auto',
+                      color: 'var(--text-primary)',
+                      transition: 'var(--transition-smooth)'
+                    }}
+                  >
+                    📂 Choose SRT/TXT File
+                  </label>
+                  {manualSubtitlesFileName && (
+                    <span style={{ fontSize: '0.85rem', color: 'var(--primary)', fontWeight: '500' }}>
+                      📄 {manualSubtitlesFileName}
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -1140,12 +1332,64 @@ Transcript:
       {result && (
         <main className="dashboard-grid">
           {/* Left panel: Player + Heatmap */}
-          <div className="sticky-player-panel">
+          <div className="sticky-player-panel" ref={leftPanelRef}>
             <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
               <h2 style={{ fontSize: '1.25rem', lineHeight: 1.3 }}>{result.title}</h2>
 
-              <div id="youtube-player-container" className="video-wrapper">
+              <div id="youtube-player-container" className="video-wrapper" style={{ position: 'relative' }}>
                 <div id="youtube-player"></div>
+                {currentSubtitle && (
+                  <div className="video-subtitle-overlay">
+                    <span>{currentSubtitle.text}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Refresh & Download controls */}
+              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.25rem', marginBottom: '0.25rem' }}>
+                <button
+                  type="button"
+                  className="form-input"
+                  onClick={handleRefreshPlayer}
+                  style={{
+                    flex: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '0.4rem',
+                    fontSize: '0.8rem',
+                    padding: '0.5rem 1rem',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    background: 'rgba(255, 255, 255, 0.03)',
+                    border: '1px solid rgba(255, 255, 255, 0.05)',
+                    color: 'var(--text-primary)'
+                  }}
+                >
+                  🔄 Refresh Player
+                </button>
+                <a
+                  href={`/api/download?video_id=${result.video_id}&title=${encodeURIComponent(result.title)}`}
+                  download
+                  className="form-input"
+                  style={{
+                    flex: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '0.4rem',
+                    fontSize: '0.8rem',
+                    padding: '0.5rem 1rem',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    background: 'rgba(255, 94, 58, 0.08)',
+                    border: '1px solid rgba(255, 94, 58, 0.2)',
+                    color: 'var(--secondary)',
+                    textDecoration: 'none'
+                  }}
+                >
+                  📥 Download Video
+                </a>
               </div>
 
               {/* Heatmap Timeline component */}
@@ -1162,9 +1406,36 @@ Transcript:
             <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
               <div>
                 <h3 style={{ fontSize: '1.05rem', color: 'var(--primary)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Video Summary</h3>
-                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  {renderSummaryWithHighlights(result.summary)}
-                </p>
+                {(() => {
+                  const { text, hashtags } = extractHashtagsAndText(result.summary);
+                  return (
+                    <>
+                      {hashtags.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.75rem' }}>
+                          {hashtags.map((tag, idx) => (
+                            <span
+                              key={idx}
+                              className="summary-hashtag-highlight"
+                              style={{
+                                color: 'var(--accent)',
+                                fontWeight: '600',
+                                background: 'rgba(16, 185, 129, 0.1)',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                border: '1px solid rgba(16, 185, 129, 0.2)',
+                                fontSize: '0.75rem',
+                                display: 'inline-block'
+                              }}
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>{text}</p>
+                    </>
+                  );
+                })()}
               </div>
 
               <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '1rem' }}>
@@ -1195,7 +1466,7 @@ Transcript:
                             : '1px solid transparent',
                           cursor: 'pointer',
                           transition: 'var(--transition-smooth)',
-                          opacity: isMarked ? 0.6 : 1
+                          opacity: 1
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, overflow: 'hidden' }}>
@@ -1215,8 +1486,9 @@ Transcript:
                           />
                           <span style={{
                             fontWeight: isSelected ? 700 : 500,
-                            color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
-                            textDecoration: isMarked ? 'line-through' : 'none',
+                            color: isMarked
+                              ? 'var(--secondary)'
+                              : (isSelected ? 'var(--text-primary)' : 'var(--text-secondary)'),
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
                             textOverflow: 'ellipsis'
@@ -1257,11 +1529,11 @@ Transcript:
           </div>
 
           {/* Right panel: Suggested Clips scrollable list */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxHeight: leftPanelHeight ? `${leftPanelHeight}px` : '80vh' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1.25rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h2 style={{ fontSize: '1.5rem', fontFamily: 'Outfit' }}>Recommended Clips</h2>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 'bold' }}>SORTED BY VIRALITY POTENTIAL</span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 'bold' }}>SORT: {sortBy.toUpperCase()}</span>
               </div>
 
               {/* Search & Filter Controls */}
@@ -1284,13 +1556,26 @@ Transcript:
                   <option value="all">🔥 All Scores</option>
                   <option value="high">🚀 High (90%+)</option>
                   <option value="medium">📈 Mid/Low (&lt;90%)</option>
+                  <option value="marked">🔖 Marked Only</option>
+                </select>
+
+                <select
+                  className="form-input virality-filter-select"
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as any)}
+                  style={{ width: 'auto', padding: '0.6rem 2rem 0.6rem 1rem', fontSize: '0.875rem', cursor: 'pointer' }}
+                >
+                  <option value="virality">🔥 Sort: Virality</option>
+                  <option value="time">⏰ Sort: Chronological</option>
+                  <option value="duration">⏱️ Sort: Duration</option>
+                  <option value="marked">🔖 Sort: Marked</option>
                 </select>
               </div>
 
               {/* Stats and Exports */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
                 <div>
-                  Showing {filteredClips.length} of {result.clips.length} clips
+                  Showing {sortedClips.length} of {result.clips.length} clips
                 </div>
                 <div style={{ display: 'flex', gap: '0.75rem' }}>
                   <button
@@ -1310,17 +1595,30 @@ Transcript:
                   >
                     📥 Download JSON
                   </button>
+                  {result.transcript && (
+                    <>
+                      <span style={{ color: 'var(--border-color)' }}>|</span>
+                      <button
+                        type="button"
+                        className="action-link-btn"
+                        onClick={handleExportSRT}
+                        style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}
+                      >
+                        📥 Download SRT
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
 
-            <div className="clips-list">
-              {filteredClips.length === 0 ? (
+            <div className="clips-list" style={{ maxHeight: 'none', flex: 1 }}>
+              {sortedClips.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
                   No clips match the active filters. Try refining your search.
                 </div>
               ) : (
-                filteredClips.map((clip, index) => {
+                sortedClips.map((clip, index) => {
                   const isActive = activeClip?.start_time === clip.start_time && activeClip?.end_time === clip.end_time;
                   const isExpanded = expandedClipIndex === index;
 
@@ -1353,7 +1651,7 @@ Transcript:
                           />
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: 1 }}>
-                          <span className="clip-title" style={{ textDecoration: !!markedClips[`${clip.start_time}_${clip.end_time}`] ? 'line-through' : 'none', opacity: !!markedClips[`${clip.start_time}_${clip.end_time}`] ? 0.6 : 1 }}>{clip.title}</span>
+                          <span className="clip-title" style={{ color: !!markedClips[`${clip.start_time}_${clip.end_time}`] ? 'var(--secondary)' : 'var(--text-primary)', opacity: 1 }}>{clip.title}</span>
                           <div className="score-meta">
                             <span className="timestamp-pill">
                               {formatSeconds(clip.start_time)} - {formatSeconds(clip.end_time)}
@@ -1379,7 +1677,7 @@ Transcript:
                               borderRadius: '4px',
                               border: '1px solid var(--secondary)'
                             }}>
-                              ✓ CREATED
+                              ✓ MARKED
                             </div>
                           )}
                         </div>
@@ -1422,9 +1720,10 @@ Transcript:
                                 <span className="suggestion-label">📝 Caption:</span>{' '}
                                 <span className="suggestion-value">
                                   {(() => {
-                                    if (!clip.hashtag_suggestion) return clip.caption_suggestion;
-                                    if (clip.caption_suggestion.includes(clip.hashtag_suggestion)) return clip.caption_suggestion;
-                                    return `${clip.caption_suggestion} ${clip.hashtag_suggestion}`;
+                                    const lowercaseHashtags = (clip.hashtag_suggestion || '').toLowerCase();
+                                    if (!lowercaseHashtags) return clip.caption_suggestion;
+                                    if (clip.caption_suggestion.toLowerCase().includes(lowercaseHashtags)) return clip.caption_suggestion;
+                                    return `${clip.caption_suggestion} ${lowercaseHashtags}`;
                                   })()}
                                 </span>
                               </div>
@@ -1434,9 +1733,11 @@ Transcript:
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const captionText = (() => {
-                                    if (!clip.hashtag_suggestion) return clip.caption_suggestion;
-                                    if (clip.caption_suggestion.includes(clip.hashtag_suggestion)) return clip.caption_suggestion;
-                                    return `${clip.caption_suggestion} ${clip.hashtag_suggestion}`;
+                                    const caption = clip.caption_suggestion || '';
+                                    const lowercaseHashtags = (clip.hashtag_suggestion || '').toLowerCase();
+                                    if (!lowercaseHashtags) return caption;
+                                    if (caption.toLowerCase().includes(lowercaseHashtags)) return caption;
+                                    return `${caption} ${lowercaseHashtags}`;
                                   })();
                                   handleCopyText(captionText, 'Caption');
                                 }}
