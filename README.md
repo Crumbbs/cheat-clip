@@ -7,7 +7,7 @@
 ## ✨ Features
 
 - 📊 **Audience Retention Heatmaps** — Maps the exact moments viewers rewound and re-watched most using `yt-dlp` player interaction data.
-- 🧠 **Google Gemini 2.5 Flash AI** — Processes transcripts enriched with retention scores to identify hook points, punchlines, and high-energy story arcs.
+- 🧠 **Google Gemini 3.5 Flash AI** — Processes transcripts enriched with retention scores to identify hook points, punchlines, and high-energy story arcs.
 - 🕒 **Custom Search Range** — Target clip searches on the full video or a custom timestamp range (e.g., `29:00–31:15`).
 - 🎬 **Smart Long-Video Handling** — Dynamically scales clip count (15–60 clips for videos >1 hour, 10–30 for shorter).
 - 🕓 **Persistent Analysis History** — Local storage caches previous analyses (thumbnails, timestamps, duration prefs) for instant reload.
@@ -24,7 +24,7 @@
 |---|---|
 | **Frontend** | React 19 · TypeScript · Vite |
 | **Backend** | Python · FastAPI · Uvicorn |
-| **AI** | Google Gemini 2.5 Flash (`google-genai`) |
+| **AI** | Google Gemini 3.5 Flash (`google-genai`) |
 | **YouTube Data** | `yt-dlp` (retention heatmap) · `youtube-transcript-api` (subtitles) |
 | **Dev Tooling** | `concurrently` · ESLint · TypeScript |
 | **Analytics** | `@vercel/analytics` |

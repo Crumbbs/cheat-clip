@@ -1338,7 +1338,7 @@ Transcript:
 
               <div id="youtube-player-container" className="video-wrapper" style={{ position: 'relative' }}>
                 <div id="youtube-player"></div>
-                {currentSubtitle && (
+                {subtitlesSource === 'manual' && currentSubtitle && (
                   <div className="video-subtitle-overlay">
                     <span>{currentSubtitle.text}</span>
                   </div>

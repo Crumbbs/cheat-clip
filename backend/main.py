@@ -292,7 +292,9 @@ def fetch_video_metadata(url: str):
             return {
                 "title": info.get('title') or 'Unknown YouTube Video',
                 "duration": float(info.get('duration') or 0.0),
-                "heatmap": info.get('heatmap') or []
+                "heatmap": info.get('heatmap') or [],
+                "is_live": bool(info.get('is_live') or False),
+                "live_status": info.get('live_status') or 'not_live'
             }
         except Exception as e:
             logger.error(f"Error extracting metadata with yt-dlp: {e}")
@@ -302,7 +304,9 @@ def fetch_video_metadata(url: str):
                 return {
                     "title": f"YouTube Video ({video_id})",
                     "duration": 0.0,
-                    "heatmap": []
+                    "heatmap": [],
+                    "is_live": False,
+                    "live_status": "not_live"
                 }
             raise HTTPException(status_code=400, detail=f"Failed to retrieve YouTube video details: {str(e)}")
 
@@ -616,11 +620,15 @@ async def analyze_video(request: AnalyzeRequest):
             title    = metadata["title"]
             duration = metadata["duration"]
             heatmap  = metadata.get("heatmap") or []
+            is_live  = metadata.get("is_live", False)
+            live_status = metadata.get("live_status", "not_live")
         except Exception as e:
             if is_mock:
                 title = "Mock YouTube Video"
                 duration = 212.0
                 heatmap = []
+                is_live = False
+                live_status = "not_live"
             else:
                 msg = e.detail if isinstance(e, HTTPException) else str(e)
                 yield _sse({"error": f"Failed to fetch video details: {msg}", "status": 500})
@@ -665,8 +673,20 @@ async def analyze_video(request: AnalyzeRequest):
                     ]
                     yield _sse({"step": 3, "message": "Mock mode — using sample transcript."})
                 else:
-                    msg = e.detail if isinstance(e, HTTPException) else str(e)
-                    yield _sse({"error": msg, "status": 400})
+                    # Provide a helpful error message if the video is live or recently completed
+                    if is_live or live_status in ('is_live', 'is_upcoming', 'post_live'):
+                        yield _sse({
+                            "error": (
+                                "No subtitles could be retrieved because this video is currently live, "
+                                "upcoming, or recently completed (post-live processing). Subtitles are only "
+                                "available once the live stream ends and YouTube finishes processing the video. "
+                                "You can upload custom subtitles manually to analyze this video."
+                            ),
+                            "status": 400
+                        })
+                    else:
+                        msg = e.detail if isinstance(e, HTTPException) else str(e)
+                        yield _sse({"error": msg, "status": 400})
                     return
 
         # Estimate duration from transcript if missing
@@ -810,7 +830,7 @@ async def analyze_video(request: AnalyzeRequest):
 
         # ── Step 4: Gemini API call with fallback models and retry ───────────
         client = genai.Client(api_key=gemini_key)
-        models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+        models_to_try = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash']
         response = None
         last_error = None
 

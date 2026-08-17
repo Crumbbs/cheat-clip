@@ -40,7 +40,10 @@ __pycache__/
 venv/
 env/
 ENV/
-.Python
+
+# Temp downloads
+backend/temp_downloads/
+
 
 # Distribution / packaging
 build/
