@@ -47,6 +47,7 @@ class ViralClip(BaseModel):
     title: str = Field(description="Catchy clip title, max 8 words")
     start_time: float = Field(description="Clip start in seconds, aligned to a sentence boundary")
     end_time: float = Field(description="Clip end in seconds, aligned to a sentence boundary")
+    hook_time: float = Field(description="Absolute timestamp in seconds from video start where the potential hook occurs inside this clip range (must be >= start_time and <= end_time)")
     virality_score: int = Field(description="Virality score 1-100")
     key_quotes: List[str] = Field(description="1-2 key quotes from the clip")
     transcript: str = Field(description="Spoken text of the clip")
@@ -58,6 +59,7 @@ class ViralClipGemini(BaseModel):
     title: str = Field(description="Catchy clip title, max 8 words")
     start_time: float = Field(description="Clip start in seconds, aligned to a sentence boundary")
     end_time: float = Field(description="Clip end in seconds, aligned to a sentence boundary")
+    hook_time: float = Field(description="Absolute timestamp in seconds from video start where the potential hook occurs inside this clip range (must be >= start_time and <= end_time)")
     virality_score: int = Field(description="Virality score 1-100")
     key_quotes: List[str] = Field(description="1-2 key quotes from the clip")
     title_suggestion: str = Field(default="", description="Catchy alternative title suggestion")
@@ -74,8 +76,10 @@ class VideoAnalysis(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., description="YouTube video URL")
-    duration: str = Field("30s", description="Target clip duration: '30s', '60s', or '1m+'")
+    duration: str = Field("30s", description="Target clip duration: '15s', '30s', or '60s'")
     api_key: Optional[str] = Field(None, description="Optional custom Gemini API key provided by the user")
+    model: Optional[str] = Field("gemini-2.5-flash", description="Preferred Gemini model name")
+    custom_prompt: Optional[str] = Field(None, description="Optional custom focus prompt for clips search")
     range_start: Optional[float] = Field(None, description="Search range start in seconds")
     range_end: Optional[float] = Field(None, description="Search range end in seconds")
     subtitles: Optional[str] = Field(None, description="Optional manual subtitles text (SRT or TXT)")
@@ -593,6 +597,48 @@ def download_video(video_id: str, background_tasks: BackgroundTasks, title: Opti
                 logger.error(f"yt-dlp fallback direct url resolution failed: {fallback_err}. Redirecting to helper service.")
                 return RedirectResponse(url=f"https://www.youtubepp.com/watch?v={video_id}")
 
+@app.get("/api/models")
+def list_available_models(api_key: str):
+    """Fetches list of available Gemini models using the user's API key."""
+    if not api_key or api_key.strip().lower() == "mock":
+        return {"models": ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']}
+    try:
+        client = genai.Client(api_key=api_key.strip())
+        models_page = client.models.list()
+        
+        model_names = []
+        for m in models_page:
+            name = m.name or ""
+            if "gemini" in name.lower():
+                # Filter out models that don't support text generation (e.g. embeddings)
+                if m.supported_actions and "generateContent" not in m.supported_actions:
+                    continue
+                
+                short_name = name.split('/')[-1]
+                # Filter out tuning, thinking, vision, image, tts, omni, and customtools specialized variants
+                exclude_keywords = ['tuning', 'thinking', 'vision', 'image', 'tts', 'omni', 'customtools']
+                if any(x in short_name for x in ['flash', 'pro', 'lite', 'exp']) \
+                   and not any(x in short_name for x in exclude_keywords):
+                    if short_name not in model_names:
+                        model_names.append(short_name)
+        
+        preferred_order = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']
+        sorted_model_names = []
+        for pref in preferred_order:
+            if pref in model_names:
+                sorted_model_names.append(pref)
+        for name in model_names:
+            if name not in sorted_model_names:
+                sorted_model_names.append(name)
+                
+        if not sorted_model_names:
+            sorted_model_names = preferred_order
+            
+        return {"models": sorted_model_names}
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        return {"models": ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']}
+
 @app.post("/api/analyze")
 async def analyze_video(request: AnalyzeRequest):
     """Stream real-time progress via Server-Sent Events, then deliver the final result."""
@@ -755,19 +801,19 @@ async def analyze_video(request: AnalyzeRequest):
         if is_mock:
             yield _sse({"step": 4, "message": "Mock mode — generating sample clip data..."})
             mock_clips = [
-                ViralClip(title="Finding hotspots using heatmaps",  start_time=11.0, end_time=22.0, virality_score=95,
+                ViralClip(title="Finding hotspots using heatmaps",  start_time=11.0, end_time=22.0, hook_time=14.0, virality_score=95,
                           key_quotes=["Uses YouTube player heatmaps.", "Processes using Gemini AI."],
                           transcript="Most people think it's magic. But it uses YouTube player heatmaps.",
                           title_suggestion="Unlock Video Virality Secrets",
                           caption_suggestion="Stop guessing what works! Here's how to use heatmaps to find viral hotspots in seconds. 🔥",
                           hashtag_suggestion="#viralclips #videoediting #heatmaps #aitools"),
-                ViralClip(title="Grow on TikTok or Reels",          start_time=22.0, end_time=32.0, virality_score=88,
+                ViralClip(title="Grow on TikTok or Reels",          start_time=22.0, end_time=32.0, hook_time=27.0, virality_score=88,
                           key_quotes=["Changing how editors crop videos.", "If you want to grow on TikTok, try it."],
                           transcript="This is changing how editors crop videos. If you want to grow on TikTok, try it.",
                           title_suggestion="The Ultimate TikTok Growth Hack",
                           caption_suggestion="Want to scale your TikTok views? This tool will revolutionize your workflow. 🚀",
                           hashtag_suggestion="#tiktokgrowth #reels #shorts #editingtips"),
-                ViralClip(title="Introductory overview of the tool", start_time=0.0,  end_time=11.0, virality_score=72,
+                ViralClip(title="Introductory overview of the tool", start_time=0.0,  end_time=11.0, hook_time=3.0, virality_score=72,
                           key_quotes=["Hello and welcome.", "Finds viral hotspots."],
                           transcript="Hello and welcome. It finds viral hotspots and highlights them.",
                           title_suggestion="Meet Cheat Clip AI",
@@ -808,18 +854,23 @@ async def analyze_video(request: AnalyzeRequest):
             transcript_dump = transcript_dump[:MAX_LINES]
 
         transcript_text = "\n".join(transcript_dump)
-        dur_range   = {"30s": "20-40s", "60s": "45-75s", "1m+": "60-180s"}.get(request.duration, "20-40s")
+        dur_range   = {"15s": "10-20s", "30s": "20-40s", "60s": "45-75s"}.get(request.duration, "20-40s")
         heatmap_note = (
             "Columns: start|end|audience_interest(0-1). Prioritise high-interest peaks."
             if heatmap else
             "No audience interest data. Use content hooks, energy, and story arcs."
         )
+        focus_instruction = ""
+        if request.custom_prompt and request.custom_prompt.strip():
+            focus_instruction = f"CRITICAL FOCUS: The user specifically wants you to find clips matching the following query/theme: \"{request.custom_prompt.strip()}\". Prioritize and tailor your selection of viral clips to fit this request, while still ensuring they make good standalone clips.\n\n"
+
         prompt = (
             f"You are a viral video clip finder.\n"
             f"Find {clip_range} short-form clip candidates from this YouTube transcript for TikTok/Reels/Shorts.\n\n"
             f"Title: {title}\n"
             f"Duration Range: {int(start_bound)}s to {int(end_bound)}s (Length: {int(duration)}s) | Target clip length: {dur_range}\n"
             f"{heatmap_note}\n"
+            f"{focus_instruction}"
             f"Match output language to transcript language.\n\n"
             f"Transcript (start|end[|interest] text):\n---\n{transcript_text}\n---\n\n"
             f"Rules: use exact seconds from transcript; clips must start/end at sentence boundaries; do not overlap.\n"
@@ -830,7 +881,9 @@ async def analyze_video(request: AnalyzeRequest):
 
         # ── Step 4: Gemini API call with fallback models and retry ───────────
         client = genai.Client(api_key=gemini_key)
-        models_to_try = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash']
+        requested_model = (request.model or 'gemini-2.5-flash').strip()
+        default_fallbacks = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']
+        models_to_try = [requested_model] + [m for m in default_fallbacks if m != requested_model]
         response = None
         last_error = None
 
@@ -905,6 +958,7 @@ async def analyze_video(request: AnalyzeRequest):
                         "title":         getattr(c, 'title', ''),
                         "start_time":    getattr(c, 'start_time', 0.0),
                         "end_time":      getattr(c, 'end_time', 0.0),
+                        "hook_time":     getattr(c, 'hook_time', None),
                         "virality_score": getattr(c, 'virality_score', 0),
                         "key_quotes":    getattr(c, 'key_quotes', []),
                         "title_suggestion": getattr(c, 'title_suggestion', ''),
@@ -938,6 +992,10 @@ async def analyze_video(request: AnalyzeRequest):
         for raw_clip in analysis_data.get('clips', []):
             start = raw_clip.get('start_time', 0.0)
             end   = raw_clip.get('end_time', 0.0)
+            hook  = raw_clip.get('hook_time')
+            if hook is None or not (start <= hook <= end):
+                hook = start
+            
             clip_lines = [
                 line.get("text", "")
                 for line in enriched_transcript
@@ -952,6 +1010,7 @@ async def analyze_video(request: AnalyzeRequest):
                 title=raw_clip.get('title', ''),
                 start_time=start,
                 end_time=end,
+                hook_time=hook,
                 virality_score=raw_clip.get('virality_score', 0),
                 key_quotes=raw_clip.get('key_quotes') or [],
                 transcript=" ".join(clip_lines),

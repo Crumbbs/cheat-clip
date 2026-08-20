@@ -12,9 +12,15 @@ declare global {
 
 export default function App() {
   const [url, setUrl] = useState('');
-  const [durationPref, setDurationPref] = useState<'30s' | '60s' | '1m+'>('30s');
+  const [durationPref, setDurationPref] = useState<'15s' | '30s' | '60s'>('30s');
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('cheat_clip_gemini_api_key') || '');
   const [showApiKey, setShowApiKey] = useState(false);
+
+  // AI model selection and custom focus prompt states
+  const [selectedModel, setSelectedModel] = useState<string>(() => localStorage.getItem('cheat_clip_selected_model') || 'gemini-2.5-flash');
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [customPrompt, setCustomPrompt] = useState<string>('');
 
   // Custom range selection states
   const [rangeType, setRangeType] = useState<'entire' | 'custom'>('entire');
@@ -141,6 +147,40 @@ export default function App() {
     };
   }, [result]);
 
+  // Fetch available AI models when API key is detected/entered
+  useEffect(() => {
+    const fetchModels = async () => {
+      const cleanKey = apiKey.trim();
+      if (!cleanKey || cleanKey.length < 20 || cleanKey.toLowerCase() === 'mock') {
+        setAvailableModels([]);
+        return;
+      }
+      setLoadingModels(true);
+      try {
+        const res = await fetch(`/api/models?api_key=${encodeURIComponent(cleanKey)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.models && data.models.length > 0) {
+            setAvailableModels(data.models);
+            if (!data.models.includes(selectedModel) && !['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro'].includes(selectedModel)) {
+              setSelectedModel(data.models[0]);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to retrieve available models:', err);
+      } finally {
+        setLoadingModels(false);
+      }
+    };
+
+    const delayDebounce = setTimeout(() => {
+      fetchModels();
+    }, 600);
+
+    return () => clearTimeout(delayDebounce);
+  }, [apiKey]);
+
   // Sync marked clips with local storage based on active video ID
   useEffect(() => {
     if (result?.video_id) {
@@ -243,7 +283,7 @@ export default function App() {
     try {
       const data: AnalyzeResponse = JSON.parse(raw);
       setUrl(`https://www.youtube.com/watch?v=${entry.video_id}`);
-      setDurationPref(entry.duration_pref as '30s' | '60s' | '1m+');
+      setDurationPref(entry.duration_pref as '15s' | '30s' | '60s');
 
       // Restore subtitle source state
       if (entry.range_suffix?.includes('_manual')) {
@@ -561,7 +601,9 @@ export default function App() {
       ? `_range_${rangeStartSecs ?? 0}_${rangeEndSecs ?? 'end'}`
       : '';
     const manualSuffix = subtitlesSource === 'manual' ? '_manual' : '';
-    const cacheKey = videoId ? `cheat_clip_cache_${videoId}_${durationPref}${rangeSuffix}${manualSuffix}` : null;
+    const promptSuffix = customPrompt.trim() ? `_prompt_${customPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_')}` : '';
+    const modelSuffix = `_model_${selectedModel}`;
+    const cacheKey = videoId ? `cheat_clip_cache_${videoId}_${durationPref}${modelSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}` : null;
 
     if (cacheKey) {
       const cachedData = localStorage.getItem(cacheKey);
@@ -625,6 +667,8 @@ export default function App() {
           url: url.trim(),
           duration: durationPref,
           api_key: apiKey.trim() || undefined,
+          model: selectedModel,
+          custom_prompt: customPrompt.trim() || undefined,
           range_start: rangeStartSecs,
           range_end: rangeEndSecs,
           subtitles: subtitlesSource === 'manual' ? manualSubtitlesContent : undefined,
@@ -673,8 +717,10 @@ export default function App() {
 
       // Cache the successful response
       if (resultData.video_id) {
-        const targetCacheKey = `cheat_clip_cache_${resultData.video_id}_${durationPref}${rangeSuffix}${manualSuffix}`;
-        const tsKey = `cheat_clip_ts_${resultData.video_id}_${durationPref}${rangeSuffix}${manualSuffix}`;
+        const promptSuffix = customPrompt.trim() ? `_prompt_${customPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_')}` : '';
+        const modelSuffix = `_model_${selectedModel}`;
+        const targetCacheKey = `cheat_clip_cache_${resultData.video_id}_${durationPref}${modelSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}`;
+        const tsKey = `cheat_clip_ts_${resultData.video_id}_${durationPref}${modelSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}`;
         localStorage.setItem(targetCacheKey, JSON.stringify(resultData));
         localStorage.setItem(tsKey, new Date().toISOString());
         refreshHistory();
@@ -958,85 +1004,152 @@ Transcript:
             </button>
           </div>
 
-          <div className="form-settings-grid">
-            {/* Preferred Duration Selector */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <label style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Target Clip Duration</label>
-              <div className="duration-selector" id="duration-selector-group">
-                <button
-                  type="button"
-                  className={`duration-btn ${durationPref === '30s' ? 'active' : ''}`}
-                  onClick={() => setDurationPref('30s')}
+          <div className="form-settings-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
+            {/* Card 1: AI Engine Configuration */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', padding: '1.25rem', borderRadius: '12px', background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255, 255, 255, 0.04)' }}>
+              <h3 style={{ fontSize: '0.9rem', color: 'var(--primary)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
+                🤖 AI Engine Settings
+              </h3>
+              
+              {/* API Key input — required */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  <span>
+                    Gemini API Key
+                    <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', fontWeight: 700, color: '#f87171', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '4px', padding: '0.1rem 0.35rem', letterSpacing: '0.04em' }}>REQUIRED</span>
+                  </span>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <a
+                      href="https://aistudio.google.com/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: 'var(--primary)', textDecoration: 'none', fontSize: '0.75rem', fontWeight: 600, transition: 'var(--transition-smooth)' }}
+                      className="action-link-btn"
+                    >
+                      🔑 Get free key
+                    </a>
+                    <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: '0.75rem' }}>|</span>
+                    <span
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      style={{ cursor: 'pointer', color: 'var(--primary)', fontSize: '0.75rem' }}
+                    >
+                      {showApiKey ? 'Hide key' : 'Show key'}
+                    </span>
+                  </div>
+                </label>
+                <input
+                  id="gemini-key-input"
+                  type={showApiKey ? 'text' : 'password'}
+                  className={`form-input${!apiKey.trim() ? ' input-error-highlight' : ''}`}
+                  placeholder="Paste your Gemini API Key here — get one free at aistudio.google.com"
+                  value={apiKey}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setApiKey(val);
+                    localStorage.setItem('cheat_clip_gemini_api_key', val);
+                    if (val.trim()) setError(null);
+                  }}
                   disabled={loading}
-                >
-                  ⚡ 30s clips
-                </button>
-                <button
-                  type="button"
-                  className={`duration-btn ${durationPref === '60s' ? 'active' : ''}`}
-                  onClick={() => setDurationPref('60s')}
+                  style={{ height: '42px' }}
+                />
+                {!apiKey.trim() && (
+                  <span style={{ fontSize: '0.75rem', color: '#f87171', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                    Required — saved locally in browser.
+                  </span>
+                )}
+              </div>
+
+              {/* AI Model Selection */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  <span>AI Model Selection</span>
+                  {loadingModels && (
+                    <span style={{ fontSize: '0.72rem', color: 'var(--primary)', animation: 'pulse 1.5s infinite ease-in-out' }}>
+                      ⌛ Fetching available...
+                    </span>
+                  )}
+                </label>
+                <select
+                  className="form-input"
+                  value={selectedModel}
+                  onChange={(e) => {
+                    setSelectedModel(e.target.value);
+                    localStorage.setItem('cheat_clip_selected_model', e.target.value);
+                  }}
                   disabled={loading}
+                  style={{ padding: '0.6rem 1rem', fontSize: '0.875rem', height: '42px', cursor: 'pointer', appearance: 'auto', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border-color)', borderRadius: '8px' }}
                 >
-                  🔥 60s clips
-                </button>
-                <button
-                  type="button"
-                  className={`duration-btn ${durationPref === '1m+' ? 'active' : ''}`}
-                  onClick={() => setDurationPref('1m+')}
-                  disabled={loading}
-                >
-                  🎬 1m+ clips
-                </button>
+                  {availableModels.length > 0 ? (
+                    availableModels.map((m) => (
+                      <option key={m} value={m} style={{ background: '#0d1324', color: '#fff' }}>
+                        {m}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="gemini-2.5-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.5-flash (Fast & recommended)</option>
+                      <option value="gemini-2.5-pro" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.5-pro (Creative & complex)</option>
+                      <option value="gemini-1.5-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-1.5-flash (Standard)</option>
+                      <option value="gemini-1.5-pro" style={{ background: '#0d1324', color: '#fff' }}>gemini-1.5-pro (Heavy-duty)</option>
+                    </>
+                  )}
+                </select>
               </div>
             </div>
 
-            {/* API Key input — required */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                <span>
-                  Gemini API Key
-                  <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', fontWeight: 700, color: '#f87171', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '4px', padding: '0.1rem 0.35rem', letterSpacing: '0.04em' }}>REQUIRED</span>
-                </span>
-                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                  <a
-                    href="https://aistudio.google.com/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: 'var(--primary)', textDecoration: 'none', fontSize: '0.75rem', fontWeight: 600, transition: 'var(--transition-smooth)' }}
-                    className="action-link-btn"
+            {/* Card 2: Clip Parameters & Focus */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', padding: '1.25rem', borderRadius: '12px', background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255, 255, 255, 0.04)' }}>
+              <h3 style={{ fontSize: '0.9rem', color: 'var(--secondary)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
+                ⚡ Clip Customization
+              </h3>
+
+              {/* Preferred Duration Selector */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <label style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Target Clip Duration</label>
+                <div className="duration-selector" id="duration-selector-group">
+                  <button
+                    type="button"
+                    className={`duration-btn ${durationPref === '15s' ? 'active' : ''}`}
+                    onClick={() => setDurationPref('15s')}
+                    disabled={loading}
                   >
-                    🔑 Get free key
-                  </a>
-                  <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: '0.75rem' }}>|</span>
-                  <span
-                    onClick={() => setShowApiKey(!showApiKey)}
-                    style={{ cursor: 'pointer', color: 'var(--primary)', fontSize: '0.75rem' }}
+                    ⚡ 15s clips
+                  </button>
+                  <button
+                    type="button"
+                    className={`duration-btn ${durationPref === '30s' ? 'active' : ''}`}
+                    onClick={() => setDurationPref('30s')}
+                    disabled={loading}
                   >
-                    {showApiKey ? 'Hide key' : 'Show key'}
-                  </span>
+                    🔥 30s clips
+                  </button>
+                  <button
+                    type="button"
+                    className={`duration-btn ${durationPref === '60s' ? 'active' : ''}`}
+                    onClick={() => setDurationPref('60s')}
+                    disabled={loading}
+                  >
+                    🎬 60s clips
+                  </button>
                 </div>
-              </label>
-              <input
-                id="gemini-key-input"
-                type={showApiKey ? 'text' : 'password'}
-                className={`form-input${!apiKey.trim() ? ' input-error-highlight' : ''}`}
-                placeholder="Paste your Gemini API Key here — get one free at aistudio.google.com"
-                value={apiKey}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setApiKey(val);
-                  localStorage.setItem('cheat_clip_gemini_api_key', val);
-                  // Clear error as soon as user starts typing
-                  if (val.trim()) setError(null);
-                }}
-                disabled={loading}
-              />
-              {!apiKey.trim() && (
-                <span style={{ fontSize: '0.75rem', color: '#f87171', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
-                  Required — your key is saved locally in your browser and never sent to our servers.
-                </span>
-              )}
+              </div>
+
+              {/* Focus Prompt Search Keyword */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <label style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  Find Specific Moments <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 400 }}>(Optional)</span>
+                </label>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="e.g., look for funny moments, controversial topics, technical explanation"
+                  value={customPrompt}
+                  onChange={(e) => setCustomPrompt(e.target.value)}
+                  disabled={loading}
+                  style={{ height: '42px' }}
+                />
+              </div>
             </div>
           </div>
 
@@ -1651,12 +1764,74 @@ Transcript:
                           />
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: 1 }}>
-                          <span className="clip-title" style={{ color: !!markedClips[`${clip.start_time}_${clip.end_time}`] ? 'var(--secondary)' : 'var(--text-primary)', opacity: 1 }}>{clip.title}</span>
-                          <div className="score-meta">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <span className="clip-title" style={{ color: !!markedClips[`${clip.start_time}_${clip.end_time}`] ? 'var(--secondary)' : 'var(--text-primary)', opacity: 1 }}>
+                              {clip.title}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCopyText(clip.title, 'Title');
+                              }}
+                              style={{
+                                background: 'rgba(255, 255, 255, 0.05)',
+                                border: '1px solid var(--border-color)',
+                                cursor: 'pointer',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontSize: '0.7rem',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '2px',
+                                color: 'var(--text-secondary)',
+                                transition: 'var(--transition-smooth)'
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.background = 'rgba(168, 85, 247, 0.15)';
+                                e.currentTarget.style.color = 'var(--primary)';
+                                e.currentTarget.style.borderColor = 'rgba(168, 85, 247, 0.3)';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+                                e.currentTarget.style.color = 'var(--text-secondary)';
+                                e.currentTarget.style.borderColor = 'var(--border-color)';
+                              }}
+                              title="Copy Title to clipboard"
+                            >
+                              📋 Copy
+                            </button>
+                          </div>
+                          <div className="score-meta" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                             <span className="timestamp-pill">
                               {formatSeconds(clip.start_time)} - {formatSeconds(clip.end_time)}
                             </span>
                             <span>Duration: {formatSeconds(clip.end_time - clip.start_time)}</span>
+                            {clip.hook_time !== undefined && (
+                              <span 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSeek(clip.hook_time!);
+                                }}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '2px',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 'bold',
+                                  color: 'var(--accent)',
+                                  background: 'rgba(16, 185, 129, 0.12)',
+                                  border: '1px solid rgba(16, 185, 129, 0.35)',
+                                  borderRadius: '4px',
+                                  padding: '0.05rem 0.35rem',
+                                  cursor: 'pointer',
+                                  whiteSpace: 'nowrap'
+                                }}
+                                title="Click to jump to the potential hook timestamp"
+                              >
+                                🪝 Hook: {formatSeconds(clip.hook_time)}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.35rem' }}>
