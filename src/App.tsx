@@ -21,6 +21,10 @@ export default function App() {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [customPrompt, setCustomPrompt] = useState<string>('');
+  const [targetClipCount, setTargetClipCount] = useState<number>(() => {
+    const val = localStorage.getItem('cheat_clip_target_clip_count');
+    return val ? Number(val) : 10;
+  });
 
   // Custom range selection states
   const [rangeType, setRangeType] = useState<'entire' | 'custom'>('entire');
@@ -589,7 +593,8 @@ export default function App() {
     const manualSuffix = subtitlesSource === 'manual' ? '_manual' : '';
     const promptSuffix = customPrompt.trim() ? `_prompt_${customPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_')}` : '';
     const modelSuffix = `_model_${selectedModel}`;
-    const cacheKey = videoId ? `cheat_clip_cache_${videoId}_${durationPref}${modelSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}` : null;
+    const clipsSuffix = `_clips_${targetClipCount}`;
+    const cacheKey = videoId ? `cheat_clip_cache_${videoId}_${durationPref}${modelSuffix}${clipsSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}` : null;
 
     if (cacheKey) {
       const cachedData = localStorage.getItem(cacheKey);
@@ -659,6 +664,7 @@ export default function App() {
           range_end: rangeEndSecs,
           subtitles: subtitlesSource === 'manual' ? manualSubtitlesContent : undefined,
           subtitles_filename: subtitlesSource === 'manual' ? manualSubtitlesFileName : undefined,
+          target_clip_count: targetClipCount,
         }),
       });
 
@@ -705,8 +711,9 @@ export default function App() {
       if (resultData.video_id) {
         const promptSuffix = customPrompt.trim() ? `_prompt_${customPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_')}` : '';
         const modelSuffix = `_model_${selectedModel}`;
-        const targetCacheKey = `cheat_clip_cache_${resultData.video_id}_${durationPref}${modelSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}`;
-        const tsKey = `cheat_clip_ts_${resultData.video_id}_${durationPref}${modelSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}`;
+        const clipsSuffix = `_clips_${targetClipCount}`;
+        const targetCacheKey = `cheat_clip_cache_${resultData.video_id}_${durationPref}${modelSuffix}${clipsSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}`;
+        const tsKey = `cheat_clip_ts_${resultData.video_id}_${durationPref}${modelSuffix}${clipsSuffix}${promptSuffix}${rangeSuffix}${manualSuffix}`;
         localStorage.setItem(targetCacheKey, JSON.stringify(resultData));
         localStorage.setItem(tsKey, new Date().toISOString());
         refreshHistory();
@@ -1081,6 +1088,9 @@ Transcript:
                     </>
                   )}
                 </select>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4, marginTop: '0.2rem' }}>
+                  💡 <strong>Model Tip:</strong> <strong>gemini-2.5-flash</strong> is fast, efficient, and recommended. If you are using a <strong>free API key</strong>, we recommend <strong>gemini-2.5-flash</strong> to prevent hitting strict free tier quota limits. Select <strong>pro</strong> models only if you have a billing-enabled key for handling complex context.
+                </span>
               </div>
             </div>
 
@@ -1135,6 +1145,54 @@ Transcript:
                   disabled={loading}
                   style={{ height: '42px' }}
                 />
+              </div>
+
+              {/* Target Clip Count Slider */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.25rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <label style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                    Target Clip Count
+                  </label>
+                  <span style={{
+                    fontSize: '0.8rem',
+                    fontWeight: 700,
+                    color: 'var(--secondary)',
+                    background: 'rgba(255, 94, 58, 0.12)',
+                    border: '1px solid rgba(255, 94, 58, 0.3)',
+                    borderRadius: '6px',
+                    padding: '0.1rem 0.5rem'
+                  }}>
+                    ≈ {targetClipCount} Clips
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', width: '10px' }}>1</span>
+                  <input
+                    type="range"
+                    min="1"
+                    max="50"
+                    value={targetClipCount}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setTargetClipCount(val);
+                      localStorage.setItem('cheat_clip_target_clip_count', String(val));
+                    }}
+                    disabled={loading}
+                    style={{
+                      flex: 1,
+                      height: '6px',
+                      borderRadius: '3px',
+                      background: 'rgba(255, 255, 255, 0.1)',
+                      outline: 'none',
+                      cursor: 'pointer',
+                      accentColor: 'var(--secondary)'
+                    }}
+                  />
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', width: '20px', textAlign: 'right' }}>50</span>
+                </div>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>
+                  💡 The AI will target around <strong>{targetClipCount}</strong> clips, adjusting dynamically (e.g., {targetClipCount <= 5 ? `${Math.max(1, targetClipCount - 1)}-${targetClipCount + 2}` : targetClipCount <= 10 ? `${Math.max(1, targetClipCount - 2)}-${targetClipCount + 3}` : `${targetClipCount - 5}-${targetClipCount + 5}`} clips) to ensure maximum quality without hard constraints.
+                </span>
               </div>
             </div>
           </div>

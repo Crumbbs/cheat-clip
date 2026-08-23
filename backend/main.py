@@ -68,7 +68,7 @@ class ViralClipGemini(BaseModel):
 
 class VideoAnalysis(BaseModel):
     summary: str = Field(description="1-2 sentence video summary, followed by 2-4 general hashtags (e.g. #podcast #marriage #success)")
-    clips: List[ViralClipGemini] = Field(description="List of viral clip candidates (10-30 for shorter videos, or 15-60 for videos longer than 1 hour), sorted by virality_score desc")
+    clips: List[ViralClipGemini] = Field(description="List of viral clip candidates, sorted by virality_score desc")
 
 # ----------------------------------------------------------------
 # API Request/Response Schemas
@@ -84,6 +84,7 @@ class AnalyzeRequest(BaseModel):
     range_end: Optional[float] = Field(None, description="Search range end in seconds")
     subtitles: Optional[str] = Field(None, description="Optional manual subtitles text (SRT or TXT)")
     subtitles_filename: Optional[str] = Field(None, description="Optional manual subtitles filename")
+    target_clip_count: Optional[int] = Field(None, description="Optional target number of clips (1-50)")
 
 class HeatmapPoint(BaseModel):
     start_time: float
@@ -842,7 +843,20 @@ async def analyze_video(request: AnalyzeRequest):
             return
 
         is_long_video = duration > 3600
-        clip_range = "15-60" if is_long_video else "10-30"
+        if request.target_clip_count:
+            N = request.target_clip_count
+            if N <= 5:
+                min_clips = max(1, N - 1)
+                max_clips = N + 2
+            elif N <= 10:
+                min_clips = max(1, N - 2)
+                max_clips = N + 3
+            else:
+                min_clips = N - 5
+                max_clips = N + 5
+            clip_range = f"{min_clips}-{max_clips}"
+        else:
+            clip_range = "15-60" if is_long_video else "10-30"
 
         # ── Step 4: Build prompt ─────────────────────────────────────────────
         transcript_dump = []
