@@ -32,4 +32,5 @@ export interface AnalyzeResponse {
   summary: string;
   clips: ViralClip[];
   transcript?: TranscriptLine[];
+  model?: string;
 }

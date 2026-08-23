@@ -104,6 +104,7 @@ class AnalyzeResponse(BaseModel):
     summary: str
     clips: List[ViralClip]
     transcript: Optional[List[TranscriptLine]] = None
+    model: Optional[str] = None
 
 # ----------------------------------------------------------------
 # Helper Functions
@@ -834,7 +835,8 @@ async def analyze_video(request: AnalyzeRequest):
                 video_id=video_id, title=title, duration=duration or 200.0,
                 heatmap=mock_heatmap,
                 summary="Mock analysis: this video explains how CHEAT CLIP works. #aitools #videoediting #productivity",
-                clips=mock_clips
+                clips=mock_clips,
+                model="Mock Gemini"
             )
             yield _sse({"done": True, "result": result.model_dump()})
             return
@@ -1048,7 +1050,8 @@ async def analyze_video(request: AnalyzeRequest):
             heatmap=response_heatmap,
             summary=clean_summary,
             clips=final_clips,
-            transcript=response_transcript
+            transcript=response_transcript,
+            model=model_name
         )
 
         yield _sse({"done": True, "result": final_result.model_dump()})

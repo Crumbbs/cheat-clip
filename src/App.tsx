@@ -225,27 +225,13 @@ export default function App() {
           if (!raw) continue;
           const data: AnalyzeResponse = JSON.parse(raw);
 
-          let duration_pref = '';
-          let video_id = '';
-          let range_suffix = '';
+          if (!data || !data.video_id) continue;
 
-          const isManual = key.endsWith('_manual');
-          const cleanKey = isManual ? key.slice(0, -7) : key;
-
-          if (cleanKey.includes('_range_')) {
-            const rangeIndex = cleanKey.indexOf('_range_');
-            range_suffix = cleanKey.substring(rangeIndex); // e.g., "_range_1740_1875"
-            if (isManual) range_suffix += '_manual';
-            const baseKey = cleanKey.substring(0, rangeIndex); // e.g., "cheat_clip_cache_dQw4w9WgXcQ_30s"
-            const parts = baseKey.replace('cheat_clip_cache_', '').split('_');
-            duration_pref = parts[parts.length - 1];
-            video_id = parts.slice(0, parts.length - 1).join('_');
-          } else {
-            const parts = cleanKey.replace('cheat_clip_cache_', '').split('_');
-            duration_pref = parts[parts.length - 1];
-            video_id = parts.slice(0, parts.length - 1).join('_');
-            if (isManual) range_suffix = '_manual';
-          }
+          const video_id = data.video_id;
+          const rest = key.substring('cheat_clip_cache_'.length);
+          const suffix = rest.substring(video_id.length + 1); // skip video_id and trailing '_'
+          const duration_pref = suffix.split('_')[0];
+          const range_suffix = suffix.substring(duration_pref.length);
 
           // Try reading cached timestamp stored separately
           const tsKey = `cheat_clip_ts_${video_id}_${duration_pref}${range_suffix}`;
@@ -295,11 +281,11 @@ export default function App() {
       // Restore range inputs if they were custom
       if (entry.range_suffix) {
         const cleanRangeSuffix = entry.range_suffix.replace('_manual', '');
-        if (cleanRangeSuffix.includes('_range_')) {
+        const rangeMatch = cleanRangeSuffix.match(/_range_([^_]+)_([^_]+)/);
+        if (rangeMatch) {
           setRangeType('custom');
-          const parts = cleanRangeSuffix.split('_'); // ["", "range", "start", "end"]
-          const startVal = parts[2];
-          const endVal = parts[3];
+          const startVal = rangeMatch[1];
+          const endVal = rangeMatch[2];
 
           setCustomRangeStart(startVal !== '0' ? formatSeconds(Number(startVal)) : '');
           setCustomRangeEnd(endVal !== 'end' ? formatSeconds(Number(endVal)) : '');
@@ -1647,6 +1633,43 @@ Transcript:
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h2 style={{ fontSize: '1.5rem', fontFamily: 'Outfit' }}>Recommended Clips</h2>
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 'bold' }}>SORT: {sortBy.toUpperCase()}</span>
+              </div>
+
+              {/* Analysis Metadata Info Bar */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '1rem',
+                padding: '0.6rem 1rem',
+                borderRadius: '10px',
+                background: 'rgba(255, 255, 255, 0.02)',
+                border: '1px solid var(--border-color)',
+                fontSize: '0.8rem',
+                color: 'var(--text-secondary)',
+                flexWrap: 'wrap'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{ fontSize: '1rem' }}>🤖</span>
+                  <span>AI Model:</span>
+                  <strong style={{ color: 'var(--primary)', fontWeight: 600 }}>
+                    {result.model || selectedModel}
+                  </strong>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{ fontSize: '1rem' }}>🎬</span>
+                  <span>Generated Clips:</span>
+                  <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+                    {result.clips.length}
+                  </strong>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{ fontSize: '1rem' }}>🔖</span>
+                  <span>Marked Clips:</span>
+                  <strong style={{ color: 'var(--secondary)', fontWeight: 600 }}>
+                    {result.clips.filter(clip => !!markedClips[`${clip.start_time}_${clip.end_time}`]).length}
+                  </strong>
+                </div>
               </div>
 
               {/* Search & Filter Controls */}
