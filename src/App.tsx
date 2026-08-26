@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { HeatmapTimeline } from './components/HeatmapTimeline';
 import type { AnalyzeResponse, ViralClip } from './types';
 
@@ -367,20 +367,6 @@ export default function App() {
     return `${days}d ago`;
   };
 
-  // Smooth scroll active clip card into view in the sidebar list
-  useEffect(() => {
-    if (activeClip && result) {
-      const index = result.clips.findIndex(
-        c => c.start_time === activeClip.start_time && c.end_time === activeClip.end_time
-      );
-      if (index !== -1) {
-        const element = document.getElementById(`clip-card-${index}`);
-        if (element) {
-          element.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-      }
-    }
-  }, [activeClip, result]);
 
   const destroyPlayer = () => {
     stopTracking();
@@ -878,36 +864,56 @@ Transcript:
   };
 
   // Filter clips based on query and virality filters
-  const filteredClips = result?.clips.filter(clip => {
-    const matchesSearch = searchQuery.trim() === '' ||
-      clip.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      clip.transcript.toLowerCase().includes(searchQuery.toLowerCase());
+  const filteredClips = useMemo(() => {
+    if (!result?.clips) return [];
+    return result.clips.filter(clip => {
+      const matchesSearch = searchQuery.trim() === '' ||
+        clip.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        clip.transcript.toLowerCase().includes(searchQuery.toLowerCase());
 
-    const matchesVirality = viralityFilter === 'all' ||
-      (viralityFilter === 'high' && clip.virality_score >= 90) ||
-      (viralityFilter === 'medium' && clip.virality_score < 90) ||
-      (viralityFilter === 'marked' && !!markedClips[`${clip.start_time}_${clip.end_time}`]);
+      const matchesVirality = viralityFilter === 'all' ||
+        (viralityFilter === 'high' && clip.virality_score >= 90) ||
+        (viralityFilter === 'medium' && clip.virality_score < 90) ||
+        (viralityFilter === 'marked' && !!markedClips[`${clip.start_time}_${clip.end_time}`]);
 
-    return matchesSearch && matchesVirality;
-  }) || [];
+      return matchesSearch && matchesVirality;
+    });
+  }, [result?.clips, searchQuery, viralityFilter, markedClips]);
 
   // Sort the filtered clips based on selected sortBy
-  const sortedClips = [...filteredClips].sort((a, b) => {
-    if (sortBy === 'virality') {
-      return b.virality_score - a.virality_score;
-    } else if (sortBy === 'time') {
-      return a.start_time - b.start_time;
-    } else if (sortBy === 'duration') {
-      return (b.end_time - b.start_time) - (a.end_time - a.start_time);
-    } else if (sortBy === 'marked') {
-      const aMarked = !!markedClips[`${a.start_time}_${a.end_time}`];
-      const bMarked = !!markedClips[`${b.start_time}_${b.end_time}`];
-      if (aMarked && !bMarked) return -1;
-      if (!aMarked && bMarked) return 1;
-      return b.virality_score - a.virality_score;
+  const sortedClips = useMemo(() => {
+    return [...filteredClips].sort((a, b) => {
+      if (sortBy === 'virality') {
+        return b.virality_score - a.virality_score;
+      } else if (sortBy === 'time') {
+        return a.start_time - b.start_time;
+      } else if (sortBy === 'duration') {
+        return (b.end_time - b.start_time) - (a.end_time - a.start_time);
+      } else if (sortBy === 'marked') {
+        const aMarked = !!markedClips[`${a.start_time}_${a.end_time}`];
+        const bMarked = !!markedClips[`${b.start_time}_${b.end_time}`];
+        if (aMarked && !bMarked) return -1;
+        if (!aMarked && bMarked) return 1;
+        return b.virality_score - a.virality_score;
+      }
+      return 0;
+    });
+  }, [filteredClips, sortBy, markedClips]);
+
+  // Smooth scroll active clip card into view in the sidebar list
+  useEffect(() => {
+    if (activeClip && sortedClips) {
+      const index = sortedClips.findIndex(
+        c => c.start_time === activeClip.start_time && c.end_time === activeClip.end_time
+      );
+      if (index !== -1) {
+        const element = document.getElementById(`clip-card-${index}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }
     }
-    return 0;
-  });
+  }, [activeClip, sortedClips]);
 
   // Find current subtitle line
   const currentSubtitle = result?.transcript?.find(
