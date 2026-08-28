@@ -704,7 +704,7 @@ async def analyze_video(request: AnalyzeRequest):
         # ── Step 4: Gemini API call with fallback models and retry ───────────
         client = genai.Client(api_key=gemini_key)
         requested_model = (request.model or 'gemini-2.5-flash').strip()
-        default_fallbacks = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']
+        default_fallbacks = ['gemini-2.5-flash', 'gemini-2.5-pro']
         models_to_try = [requested_model] + [m for m in default_fallbacks if m != requested_model]
         response = None
         last_error = None
