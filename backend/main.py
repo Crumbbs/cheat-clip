@@ -15,6 +15,8 @@ import re
 import logging
 import asyncio
 import json
+import subprocess
+import uuid
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
@@ -413,6 +415,100 @@ def get_average_heatmap_value(start: float, end: float, heatmap: List[dict]) -> 
             min_dist = dist
             closest_val = point.get('value', 0.0)
     return closest_val
+
+# ----------------------------------------------------------------
+# Video Download & Clip Export Helpers
+# ----------------------------------------------------------------
+
+EXPORT_ROOT = Path("/tmp/cheat-clip-exports")
+
+
+def download_source_video(url: str, output_dir: Path) -> Path:
+    """
+    Downloads the YouTube video once so multiple clips can be cut from it.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    proxy_url = (
+        os.environ.get("YOUTUBE_PROXY")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+    )
+
+    output_template = str(output_dir / "source.%(ext)s")
+
+    ydl_opts = {
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "outtmpl": output_template,
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": False,
+        "nocheckcertificate": True,
+    }
+
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=True)
+
+    # Prefer merged MP4
+    mp4_file = output_dir / "source.mp4"
+    if mp4_file.exists():
+        return mp4_file
+
+    # Fallback in case yt-dlp produced another extension
+    source_files = list(output_dir.glob("source.*"))
+
+    if not source_files:
+        raise RuntimeError("Video download completed but source file was not found.")
+
+    return source_files[0]
+
+
+def cut_video_clip(
+    source_path: Path,
+    output_path: Path,
+    start_time: float,
+    end_time: float,
+):
+    """
+    Cuts an accurate MP4 clip using FFmpeg.
+    """
+
+    if start_time < 0:
+        start_time = 0
+
+    if end_time <= start_time:
+        raise ValueError("Clip end time must be greater than start time.")
+
+    duration = end_time - start_time
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss", str(start_time),
+        "-i", str(source_path),
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        logger.error(f"FFmpeg error: {result.stderr}")
+        raise RuntimeError("FFmpeg failed to create the clip.")
+
+    return output_path
 
 # ----------------------------------------------------------------
 # Routes
