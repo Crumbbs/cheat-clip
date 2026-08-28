@@ -522,6 +522,95 @@ def _sse(data: dict) -> str:
 def health_check():
     return {"status": "ok", "message": "CHEAT CLIP API is active"}
 
+@app.post("/api/export-clips")
+async def export_clips(request: ExportClipsRequest):
+    if not request.clips:
+        raise HTTPException(status_code=400, detail="No clips were provided.")
+
+    job_id = uuid.uuid4().hex
+    job_dir = EXPORT_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Download the source video only once
+        source_path = await asyncio.to_thread(
+            download_source_video,
+            request.url,
+            job_dir,
+        )
+
+        exported_clips = []
+
+        for index, clip in enumerate(request.clips, start=1):
+            safe_title = re.sub(
+                r"[^a-zA-Z0-9_-]+",
+                "_",
+                clip.title.strip()
+            ).strip("_")
+
+            if not safe_title:
+                safe_title = f"clip_{index}"
+
+            filename = f"{index:02d}_{safe_title[:60]}.mp4"
+            output_path = job_dir / filename
+
+            await asyncio.to_thread(
+                cut_video_clip,
+                source_path,
+                output_path,
+                clip.start_time,
+                clip.end_time,
+            )
+
+            exported_clips.append({
+                "title": clip.title,
+                "start_time": clip.start_time,
+                "end_time": clip.end_time,
+                "filename": filename,
+                "download_url": f"/api/download/{job_id}/{filename}",
+            })
+
+        # Remove the full source video after all clips are created
+        try:
+            source_path.unlink()
+        except Exception:
+            pass
+
+        return {
+            "job_id": job_id,
+            "clips": exported_clips,
+        }
+
+    except Exception as e:
+        logger.exception("Clip export failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Clip export failed: {str(e)}"
+        )
+
+
+@app.get("/api/download/{job_id}/{filename}")
+def download_clip(job_id: str, filename: str):
+    # Only allow our generated job IDs
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=400, detail="Invalid download ID.")
+
+    job_dir = (EXPORT_ROOT / job_id).resolve()
+    file_path = (job_dir / filename).resolve()
+
+    # Prevent someone requesting arbitrary server files
+    if job_dir not in file_path.parents:
+        raise HTTPException(status_code=400, detail="Invalid file path.")
+
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Clip not found.")
+
+    return FileResponse(
+        path=str(file_path),
+        media_type="video/mp4",
+        filename=filename,
+    )
+
 
 
 @app.get("/api/models")
