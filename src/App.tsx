@@ -17,7 +17,13 @@ export default function App() {
   const [showApiKey, setShowApiKey] = useState(false);
 
   // AI model selection and custom focus prompt states
-  const [selectedModel, setSelectedModel] = useState<string>(() => localStorage.getItem('cheat_clip_selected_model') || 'gemini-2.5-flash');
+  const [selectedModel, setSelectedModel] = useState<string>(() => {
+    const saved = localStorage.getItem('cheat_clip_selected_model');
+    if (!saved || ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro'].includes(saved)) {
+      return 'gemini-3.6-flash';
+    }
+    return saved;
+  });
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [customPrompt, setCustomPrompt] = useState<string>('');
@@ -67,6 +73,10 @@ export default function App() {
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [activeClip, setActiveClip] = useState<ViralClip | null>(null);
   const [expandedClipIndex, setExpandedClipIndex] = useState<number | null>(null);
+
+  // MP4 export states
+  const [exportingClips, setExportingClips] = useState(false);
+  const [exportedClips, setExportedClips] = useState<Record<string, string>>({});
 
   const leftPanelRef = useRef<HTMLDivElement>(null);
   const [leftPanelHeight, setLeftPanelHeight] = useState<number | null>(null);
@@ -166,8 +176,9 @@ export default function App() {
           const data = await res.json();
           if (data.models && data.models.length > 0) {
             setAvailableModels(data.models);
-            if (!data.models.includes(selectedModel) && !['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro'].includes(selectedModel)) {
+            if (!data.models.includes(selectedModel)) {
               setSelectedModel(data.models[0]);
+              localStorage.setItem('cheat_clip_selected_model', data.models[0]);
             }
           }
         }
@@ -310,6 +321,7 @@ export default function App() {
       setError(null);
       setResult(null);
       setActiveClip(null);
+      setExportedClips({});
       setCurrentStep(1);
       setLoadingDetails('Loading from history...');
       setTimeout(() => {
@@ -609,6 +621,7 @@ export default function App() {
 
           setResult(parsedData);
           setLoading(false);
+          setExportedClips({});
 
           // Select first clip by default
           if (parsedData.clips && parsedData.clips.length > 0) {
@@ -631,6 +644,7 @@ export default function App() {
     setError(null);
     setResult(null);
     setActiveClip(null);
+    setExportedClips({});
     setCurrentStep(1);
     setLoadingDetails('Connecting to YouTube...');
 
@@ -710,6 +724,9 @@ export default function App() {
 
       if (resultData.clips?.length > 0) setActiveClip(resultData.clips[0]);
       setTimeout(() => initPlayer(resultData!.video_id), 100);
+
+      // Automatically create downloadable MP4s after a fresh successful analysis.
+      void generateMP4sForResult(resultData, url.trim());
 
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred during analysis.');
@@ -829,6 +846,62 @@ Transcript:
 
     setToastMessage("Downloaded subtitles as SRT successfully!");
     setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  const generateMP4sForResult = async (analysisResult: AnalyzeResponse, sourceUrl: string) => {
+    if (!analysisResult.clips?.length || !sourceUrl.trim()) return;
+
+    setExportingClips(true);
+    setExportedClips({});
+    setToastMessage(`Generating ${analysisResult.clips.length} MP4 clips...`);
+
+    try {
+      const response = await fetch('/api/export-clips', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: sourceUrl.trim(),
+          clips: analysisResult.clips.map((clip) => ({
+            title: clip.title,
+            start_time: clip.start_time,
+            end_time: clip.end_time,
+          })),
+        }),
+      });
+
+      let data: any = null;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error('The server returned an invalid response while generating MP4 clips.');
+      }
+
+      if (!response.ok) {
+        throw new Error(data?.detail || 'Failed to generate MP4 clips.');
+      }
+
+      const downloadMap: Record<string, string> = {};
+      (data.clips || []).forEach((clip: any) => {
+        downloadMap[`${clip.start_time}_${clip.end_time}`] = clip.download_url;
+      });
+
+      setExportedClips(downloadMap);
+      setToastMessage(`Generated ${Object.keys(downloadMap).length} downloadable MP4 clips.`);
+      setTimeout(() => setToastMessage(null), 4000);
+    } catch (err: any) {
+      console.error('MP4 generation failed:', err);
+      setToastMessage(`MP4 generation failed: ${err.message || 'Unknown error'}`);
+      setTimeout(() => setToastMessage(null), 6000);
+    } finally {
+      setExportingClips(false);
+    }
+  };
+
+  const handleGenerateMP4s = async () => {
+    if (!result || !url.trim()) return;
+    await generateMP4sForResult(result, url.trim());
   };
 
   const handleCopyAllMarkdown = () => {
@@ -1087,15 +1160,13 @@ Transcript:
                     ))
                   ) : (
                     <>
-                      <option value="gemini-2.5-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.5-flash (Fast & recommended)</option>
-                      <option value="gemini-2.5-pro" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.5-pro (Creative & complex)</option>
-                      <option value="gemini-1.5-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-1.5-flash (Standard)</option>
-                      <option value="gemini-1.5-pro" style={{ background: '#0d1324', color: '#fff' }}>gemini-1.5-pro (Heavy-duty)</option>
+                      <option value="gemini-3.6-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-3.6-flash (Fast & recommended)</option>
+                      <option value="gemini-3.1-pro-preview" style={{ background: '#0d1324', color: '#fff' }}>gemini-3.1-pro-preview (More advanced)</option>
                     </>
                   )}
                 </select>
                 <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4, marginTop: '0.2rem' }}>
-                  💡 <strong>Model Tip:</strong> <strong>gemini-2.5-flash</strong> is fast, efficient, and recommended. If you are using a <strong>free API key</strong>, we recommend <strong>gemini-2.5-flash</strong> to prevent hitting strict free tier quota limits. Select <strong>pro</strong> models only if you have a billing-enabled key for handling complex context.
+                  💡 <strong>Model Tip:</strong> <strong>gemini-3.6-flash</strong> is the recommended default for fast clip analysis. Use <strong>gemini-3.1-pro-preview</strong> when you want a more advanced model and your API access supports it.
                 </span>
               </div>
             </div>
@@ -1766,10 +1837,32 @@ Transcript:
 
               {/* Stats and Exports */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                <div>
-                  Showing {sortedClips.length} of {result.clips.length} clips
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <span>Showing {sortedClips.length} of {result.clips.length} clips</span>
+                  <button
+                    type="button"
+                    className="action-link-btn"
+                    onClick={handleGenerateMP4s}
+                    disabled={exportingClips}
+                    style={{
+                      background: exportingClips ? 'rgba(255,255,255,0.04)' : 'rgba(16,185,129,0.12)',
+                      border: '1px solid rgba(16,185,129,0.35)',
+                      color: exportingClips ? 'var(--text-muted)' : '#34d399',
+                      cursor: exportingClips ? 'wait' : 'pointer',
+                      fontWeight: 700,
+                      fontSize: '0.8rem',
+                      padding: '0.35rem 0.65rem',
+                      borderRadius: '6px'
+                    }}
+                  >
+                    {exportingClips
+                      ? '⏳ Generating MP4s...'
+                      : Object.keys(exportedClips).length > 0
+                        ? `🎬 Regenerate MP4s (${Object.keys(exportedClips).length} ready)`
+                        : '🎬 Generate MP4s'}
+                  </button>
                 </div>
-                <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                   <button
                     type="button"
                     className="action-link-btn"
@@ -1813,6 +1906,7 @@ Transcript:
                 sortedClips.map((clip, index) => {
                   const isActive = activeClip?.start_time === clip.start_time && activeClip?.end_time === clip.end_time;
                   const isExpanded = expandedClipIndex === index;
+                  const clipDownloadUrl = exportedClips[`${clip.start_time}_${clip.end_time}`];
 
                   return (
                     <div
@@ -2005,20 +2099,63 @@ Transcript:
                       )}
 
                       {/* Actions and expand button */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.03)', paddingTop: '0.75rem' }}>
-                        <button
-                          type="button"
-                          className="glowing-btn"
-                          style={{ padding: '0.45rem 1rem', fontSize: '0.8rem', borderRadius: '8px', boxShadow: 'none' }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            playClip(clip);
-                          }}
-                        >
-                          ⚡ Preview Clip
-                        </button>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.03)', paddingTop: '0.75rem' }}>
+                        <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                          <button
+                            type="button"
+                            className="glowing-btn"
+                            style={{ padding: '0.45rem 1rem', fontSize: '0.8rem', borderRadius: '8px', boxShadow: 'none' }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              playClip(clip);
+                            }}
+                          >
+                            ⚡ Preview Clip
+                          </button>
 
-                        <div style={{ display: 'flex', gap: '0.75rem' }}>
+                          {clipDownloadUrl ? (
+                            <a
+                              href={clipDownloadUrl}
+                              download
+                              className="glowing-btn"
+                              onClick={(e) => e.stopPropagation()}
+                              style={{
+                                padding: '0.45rem 1rem',
+                                fontSize: '0.8rem',
+                                borderRadius: '8px',
+                                boxShadow: 'none',
+                                textDecoration: 'none',
+                                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                              }}
+                            >
+                              ⬇️ Download MP4
+                            </a>
+                          ) : (
+                            <button
+                              type="button"
+                              className="form-input"
+                              disabled={exportingClips}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleGenerateMP4s();
+                              }}
+                              style={{
+                                padding: '0.45rem 1rem',
+                                fontSize: '0.8rem',
+                                width: 'auto',
+                                borderRadius: '8px',
+                                cursor: exportingClips ? 'wait' : 'pointer',
+                                opacity: exportingClips ? 0.65 : 1,
+                                background: 'rgba(16,185,129,0.08)',
+                                borderColor: 'rgba(16,185,129,0.3)'
+                              }}
+                            >
+                              {exportingClips ? '⏳ Preparing MP4...' : '🎬 Generate MP4'}
+                            </button>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
                           <button
                             type="button"
                             className="form-input"
