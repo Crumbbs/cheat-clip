@@ -11,7 +11,7 @@ RUN npm run build
 FROM python:3.12-slim
 
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
