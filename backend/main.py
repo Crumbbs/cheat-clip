@@ -358,8 +358,7 @@ def fetch_transcript(video_id: str) -> List[dict]:
         status_code=400,
         detail=(
             "No subtitles could be retrieved for this video. "
-            "The video may have subtitles disabled, be age-restricted, private, or require a sign-in. "
-            "Try a different video."
+            "Subtitles might be disabled, or the video may be age-restricted, private, or require a login."
         )
     )
 

@@ -1435,7 +1435,15 @@ Transcript:
             <span style={{ fontSize: '1.5rem', color: '#ef4444' }}>⚠️</span>
             <div>
               <h4 style={{ color: '#ef4444' }}>Analysis Failed</h4>
-              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>{error}</p>
+              {error.toLowerCase().includes("no subtitles") ? (
+                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginTop: '0.25rem', lineHeight: '1.5' }}>
+                  No subtitles could be retrieved for this video. Subtitles might be disabled, or the video may be age-restricted or private.
+                  <br /><br />
+                  💡 <strong>Tip for Serverless Deployment (Vercel):</strong> Serverless hosting providers can get blocked when fetching auto-generated YouTube transcripts. To resolve this, you can download the subtitles manually using a tool like <a href="https://downsub.com/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--secondary)', textDecoration: 'underline', fontWeight: '500' }}>downsub.com</a>, upload the file via the <strong>Upload custom subtitle</strong> settings above, and try analyzing the video again.
+                </p>
+              ) : (
+                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>{error}</p>
+              )}
             </div>
           </div>
         </section>
