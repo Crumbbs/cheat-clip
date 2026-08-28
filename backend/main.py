@@ -238,28 +238,6 @@ def parse_manual_subtitles(content: str, default_duration: float = 0.0) -> List[
         
     return []
 
-def format_to_srt(lines: List[dict]) -> str:
-    srt_output = []
-    for idx, line in enumerate(lines):
-        start = line["start"]
-        end = start + line.get("duration", 3.0)
-        
-        # Convert seconds to HH:MM:SS,mmm
-        def to_srt_time(seconds: float) -> str:
-            h = int(seconds // 3600)
-            m = int((seconds % 3600) // 60)
-            s = int(seconds % 60)
-            ms = int(round((seconds % 1) * 1000))
-            if ms == 1000:
-                s += 1
-                ms = 0
-            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-            
-        srt_output.append(f"{idx + 1}")
-        srt_output.append(f"{to_srt_time(start)} --> {to_srt_time(end)}")
-        srt_output.append(line["text"])
-        srt_output.append("")
-    return "\n".join(srt_output)
 
 def extract_video_id(url: str) -> Optional[str]:
     """Extracts the 11-character YouTube video ID from various URL formats."""
@@ -437,167 +415,7 @@ def _sse(data: dict) -> str:
 def health_check():
     return {"status": "ok", "message": "CHEAT CLIP API is active"}
 
-@app.get("/api/download")
-def download_video(video_id: str, background_tasks: BackgroundTasks, title: Optional[str] = None):
-    """Retrieves video download (minimum 1080p, preferring highest resolution) and streams/forces download.
-    Falls back to 360p direct streaming if high-quality download or merge fails.
-    """
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    proxy_url = os.environ.get("YOUTUBE_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
-    
-    # 1. Attempt High-Quality Download & Merge
-    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    ydl_opts_hq = {
-        'format': 'bestvideo[height>=1080]+bestaudio/bestvideo+bestaudio/best',
-        'merge_output_format': 'mp4',
-        'outtmpl': os.path.join(temp_dir, f"{video_id}_%(ext)s"),
-        'remote_components': 'ejs:github',
-        'quiet': True,
-        'no_warnings': True,
-    }
-    if proxy_url:
-        ydl_opts_hq['proxy'] = proxy_url
-        
-    try:
-        logger.info(f"Attempting high-quality download/merge for video_id: {video_id}")
-        with yt_dlp.YoutubeDL(ydl_opts_hq) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            base, _ = os.path.splitext(filename)
-            final_filepath = base + ".mp4"
-            
-            if not os.path.exists(final_filepath):
-                # Fallback if it downloaded with another extension
-                final_filepath = filename
-                
-            if not os.path.exists(final_filepath):
-                raise Exception("Downloaded merged video file not found on disk")
-                
-            # Extract and sanitize video title
-            video_title = title or info.get('title') or f"video_{video_id}"
-            safe_title = re.sub(r'[\x00-\x1f\\/*?:"<>|]', '_', video_title)
-            safe_title = re.sub(r'\s+', ' ', safe_title).strip()
-            download_filename = f"{safe_title}.mp4"
-            
-            srt_filepath = os.path.join(temp_dir, f"{video_id}.srt")
-            files_to_remove = [final_filepath]
-            
-            if os.path.exists(srt_filepath):
-                logger.info(f"Subtitles file found for {video_id}. Muxing into output...")
-                muxed_filepath = base + "_subbed.mp4"
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-i', final_filepath,
-                    '-i', srt_filepath,
-                    '-c', 'copy',
-                    '-c:s', 'mov_text',
-                    muxed_filepath
-                ]
-                import subprocess
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0 and os.path.exists(muxed_filepath):
-                    final_filepath = muxed_filepath
-                    files_to_remove.append(muxed_filepath)
-                    logger.info("Subtitles muxed successfully into output MP4!")
-                else:
-                    logger.error(f"FFmpeg subtitle muxing failed: {result.stderr}")
-            
-            def remove_files(paths: List[str]):
-                for path in paths:
-                    if os.path.exists(path):
-                        try:
-                            os.remove(path)
-                            logger.info(f"Successfully cleaned up temporary download file: {path}")
-                        except Exception as delete_err:
-                            logger.error(f"Failed to delete temporary file {path}: {delete_err}")
-            
-            background_tasks.add_task(remove_files, files_to_remove)
-            
-            logger.info(f"Serving high-quality file response for {video_id}: {final_filepath}")
-            return FileResponse(
-                final_filepath,
-                media_type="video/mp4",
-                filename=download_filename
-            )
-            
-    except Exception as hq_err:
-        logger.error(f"High-quality download failed for {video_id}: {hq_err}. Falling back to 360p direct streaming.")
-        
-        # 2. Fallback to 360p direct streaming
-        ydl_opts_fallback = {
-            'format': 'best',
-            'quiet': True,
-            'no_warnings': True,
-        }
-        if proxy_url:
-            ydl_opts_fallback['proxy'] = proxy_url
-            
-        with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
-            try:
-                info = ydl.extract_info(url, download=False)
-                formats = info.get('formats', [])
-                best_url = None
-                ext = 'mp4'
-                
-                # Search in reverse to find the highest quality combined format (audio + video)
-                for f in reversed(formats):
-                    if f.get('acodec') != 'none' and f.get('vcodec') != 'none' and f.get('url'):
-                        if f.get('url').startswith('https'):
-                            best_url = f.get('url')
-                            ext = f.get('ext') or 'mp4'
-                            break
-                if not best_url:
-                    best_url = info.get('url')
-                    ext = info.get('ext') or 'mp4'
-                    
-                if not best_url:
-                    raise Exception("Could not resolve format url")
-                    
-                video_title = title or info.get('title') or f"video_{video_id}"
-                safe_title = re.sub(r'[\x00-\x1f\\/*?:"<>|]', '_', video_title)
-                safe_title = re.sub(r'\s+', ' ', safe_title).strip()
-                filename = f"{safe_title}.{ext}"
-                
-                import urllib.request
-                import urllib.parse
-                
-                def stream_file():
-                    req = urllib.request.Request(
-                        best_url,
-                        headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                        }
-                    )
-                    try:
-                        with urllib.request.urlopen(req) as response:
-                            while True:
-                                chunk = response.read(128 * 1024)
-                                if not chunk:
-                                    break
-                                yield chunk
-                    except Exception as stream_err:
-                        logger.error(f"Error during video streaming chunk transfer: {stream_err}")
-                
-                encoded_filename = urllib.parse.quote(filename)
-                ascii_filename = re.sub(r'[^\x00-\x7F]+', '_', filename)
-                ascii_filename = ascii_filename.replace('"', '_').replace("'", "_")
-                content_disposition = f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{encoded_filename}'
-                
-                media_type = f"video/{ext}" if ext in ['mp4', 'webm', 'ogg'] else "application/octet-stream"
-                
-                return StreamingResponse(
-                    stream_file(),
-                    media_type=media_type,
-                    headers={
-                        "Content-Disposition": content_disposition,
-                        "Accept-Ranges": "bytes"
-                    }
-                )
-            except Exception as fallback_err:
-                logger.error(f"yt-dlp fallback direct url resolution failed: {fallback_err}. Redirecting to helper service.")
-                return RedirectResponse(url=f"https://www.youtubepp.com/watch?v={video_id}")
+
 
 @app.get("/api/models")
 def list_available_models(api_key: str):
@@ -742,17 +560,6 @@ async def analyze_video(request: AnalyzeRequest):
             last = transcript_lines[-1]
             duration = last.get("start", 0.0) + last.get("duration", 0.0)
 
-        # Save subtitles to temp_downloads for possible video downloads muxing
-        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
-        os.makedirs(temp_dir, exist_ok=True)
-        srt_filepath = os.path.join(temp_dir, f"{video_id}.srt")
-        try:
-            srt_content = format_to_srt(transcript_lines)
-            with open(srt_filepath, "w", encoding="utf-8") as f_srt:
-                f_srt.write(srt_content)
-            logger.info(f"Subtitles saved to temp cache: {srt_filepath}")
-        except Exception as srt_err:
-            logger.error(f"Failed to save temporary subtitles: {srt_err}")
 
         # Slice transcript based on custom search range if provided
         start_bound = 0.0

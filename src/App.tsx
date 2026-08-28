@@ -1508,8 +1508,8 @@ Transcript:
                 )}
               </div>
 
-              {/* Refresh & Download controls */}
-              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.25rem', marginBottom: '0.25rem' }}>
+              {/* Refresh Player control */}
+              <div style={{ display: 'flex', marginTop: '0.25rem', marginBottom: '0.25rem' }}>
                 <button
                   type="button"
                   className="form-input"
@@ -1531,28 +1531,6 @@ Transcript:
                 >
                   🔄 Refresh Player
                 </button>
-                <a
-                  href={`/api/download?video_id=${result.video_id}&title=${encodeURIComponent(result.title)}`}
-                  download
-                  className="form-input"
-                  style={{
-                    flex: 1,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '0.4rem',
-                    fontSize: '0.8rem',
-                    padding: '0.5rem 1rem',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                    background: 'rgba(255, 94, 58, 0.08)',
-                    border: '1px solid rgba(255, 94, 58, 0.2)',
-                    color: 'var(--secondary)',
-                    textDecoration: 'none'
-                  }}
-                >
-                  📥 Download Video
-                </a>
               </div>
 
               {/* Heatmap Timeline component */}
