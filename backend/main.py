@@ -17,6 +17,8 @@ import asyncio
 import json
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from fastapi.responses import StreamingResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -885,4 +887,7 @@ async def analyze_video(request: AnalyzeRequest):
             "X-Accel-Buffering": "no",
         }
     )
+frontend_dir = Path(__file__).resolve().parent.parent / "dist"
 
+if frontend_dir.exists():
+    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
