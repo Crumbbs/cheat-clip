@@ -17,6 +17,7 @@ import asyncio
 import json
 import subprocess
 import uuid
+from faster_whisper import WhisperModel
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
@@ -510,6 +511,242 @@ def cut_video_clip(
 
     return output_path
 
+
+# ----------------------------------------------------------------
+# Filler Word + Silence Cleanup
+# ----------------------------------------------------------------
+
+_whisper_model = None
+
+FILLER_WORDS = {
+    "uh",
+    "um",
+    "uhm",
+    "umm",
+    "ummm",
+    "erm",
+    "er",
+}
+
+
+def get_whisper_model():
+    global _whisper_model
+
+    if _whisper_model is None:
+        model_name = os.environ.get("WHISPER_MODEL", "tiny")
+        logger.info(f"Loading Whisper model: {model_name}")
+        _whisper_model = WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type="int8",
+        )
+
+    return _whisper_model
+
+
+def merge_intervals(intervals):
+    """Merge overlapping time intervals."""
+    if not intervals:
+        return []
+
+    intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [intervals[0]]
+
+    for start, end in intervals[1:]:
+        last_start, last_end = merged[-1]
+
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+def cleanup_video_clip(
+    input_path: Path,
+    output_path: Path,
+    remove_fillers: bool = True,
+    remove_silence: bool = True,
+    silence_threshold: float = 0.7,
+):
+    """
+    Uses Whisper word timestamps to remove filler words
+    and long gaps of silence from an already-cut clip.
+    """
+
+    model = get_whisper_model()
+
+    segments, _ = model.transcribe(
+        str(input_path),
+        word_timestamps=True,
+        vad_filter=False,
+        beam_size=1,
+    )
+
+    words = []
+
+    for segment in segments:
+        if not segment.words:
+            continue
+
+        for word in segment.words:
+            cleaned_word = (
+                word.word
+                .lower()
+                .strip()
+                .strip(".,!?;:\"'()[]{}")
+            )
+
+            words.append({
+                "text": cleaned_word,
+                "start": float(word.start),
+                "end": float(word.end),
+            })
+
+    if not words:
+        logger.warning("Whisper found no words — returning original clip.")
+        return input_path
+
+    removal_intervals = []
+
+    if remove_fillers:
+        for word in words:
+            if word["text"] in FILLER_WORDS:
+                start = max(0.0, word["start"] - 0.06)
+                end = word["end"] + 0.06
+                removal_intervals.append((start, end))
+                logger.info(
+                    f"Removing filler '{word['text']}' "
+                    f"{start:.2f}s-{end:.2f}s"
+                )
+
+    if remove_silence:
+        for i in range(len(words) - 1):
+            current_word = words[i]
+            next_word = words[i + 1]
+
+            gap_start = current_word["end"]
+            gap_end = next_word["start"]
+            gap_duration = gap_end - gap_start
+
+            if gap_duration >= silence_threshold:
+                keep_pause = 0.18
+                remove_start = gap_start + (keep_pause / 2)
+                remove_end = gap_end - (keep_pause / 2)
+
+                if remove_end > remove_start:
+                    removal_intervals.append((remove_start, remove_end))
+                    logger.info(
+                        f"Removing silence "
+                        f"{remove_start:.2f}s-{remove_end:.2f}s "
+                        f"(gap {gap_duration:.2f}s)"
+                    )
+
+    removal_intervals = merge_intervals(removal_intervals)
+
+    if not removal_intervals:
+        logger.info("No filler words or long silence found.")
+        return input_path
+
+    probe_command = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(input_path),
+    ]
+
+    probe = subprocess.run(
+        probe_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if probe.returncode != 0:
+        raise RuntimeError(f"FFprobe failed: {probe.stderr}")
+
+    clip_duration = float(probe.stdout.strip())
+
+    keep_intervals = []
+    cursor = 0.0
+
+    for start, end in removal_intervals:
+        start = max(0.0, start)
+        end = min(clip_duration, end)
+
+        if start > cursor:
+            keep_intervals.append((cursor, start))
+
+        cursor = max(cursor, end)
+
+    if cursor < clip_duration:
+        keep_intervals.append((cursor, clip_duration))
+
+    keep_intervals = [
+        (start, end)
+        for start, end in keep_intervals
+        if end - start >= 0.08
+    ]
+
+    if not keep_intervals:
+        logger.warning("Cleanup would remove entire clip — keeping original.")
+        return input_path
+
+    filters = []
+    concat_inputs = []
+
+    for index, (start, end) in enumerate(keep_intervals):
+        filters.append(
+            f"[0:v]trim=start={start}:end={end},"
+            f"setpts=PTS-STARTPTS[v{index}]"
+        )
+        filters.append(
+            f"[0:a]atrim=start={start}:end={end},"
+            f"asetpts=PTS-STARTPTS[a{index}]"
+        )
+        concat_inputs.append(f"[v{index}][a{index}]")
+
+    filter_complex = (
+        ";".join(filters)
+        + ";"
+        + "".join(concat_inputs)
+        + f"concat=n={len(keep_intervals)}:v=1:a=1[outv][outa]"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i", str(input_path),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+        "-map", "[outa]",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        logger.error(f"FFmpeg cleanup failed: {result.stderr}")
+        raise RuntimeError("FFmpeg failed while removing filler words/silence.")
+
+    logger.info(
+        f"Cleaned clip created: {output_path.name}. "
+        f"Removed {len(removal_intervals)} sections."
+    )
+
+    return output_path
+
 # ----------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------
@@ -532,7 +769,6 @@ async def export_clips(request: ExportClipsRequest):
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Download the source video only once
         source_path = await asyncio.to_thread(
             download_source_video,
             request.url,
@@ -552,15 +788,54 @@ async def export_clips(request: ExportClipsRequest):
                 safe_title = f"clip_{index}"
 
             filename = f"{index:02d}_{safe_title[:60]}.mp4"
+            raw_filename = f"{index:02d}_{safe_title[:60]}_raw.mp4"
+
+            raw_output_path = job_dir / raw_filename
             output_path = job_dir / filename
 
+            # Step 1: Cut the original Gemini-selected timestamp
             await asyncio.to_thread(
                 cut_video_clip,
                 source_path,
-                output_path,
+                raw_output_path,
                 clip.start_time,
                 clip.end_time,
             )
+
+            # Step 2: Remove filler words + dead air
+            try:
+                cleaned_path = await asyncio.to_thread(
+                    cleanup_video_clip,
+                    raw_output_path,
+                    output_path,
+                    True,
+                    True,
+                    0.7,
+                )
+
+                if cleaned_path == raw_output_path:
+                    if output_path.exists():
+                        output_path.unlink()
+                    raw_output_path.replace(output_path)
+                else:
+                    try:
+                        raw_output_path.unlink()
+                    except Exception:
+                        pass
+
+            except Exception as cleanup_error:
+                logger.exception(
+                    f"Cleanup failed for clip {index}: {cleanup_error}. "
+                    f"Using uncleaned clip instead."
+                )
+
+                try:
+                    if output_path.exists():
+                        output_path.unlink()
+                except Exception:
+                    pass
+
+                raw_output_path.replace(output_path)
 
             exported_clips.append({
                 "title": clip.title,
@@ -570,7 +845,6 @@ async def export_clips(request: ExportClipsRequest):
                 "download_url": f"/api/download/{job_id}/{filename}",
             })
 
-        # Remove the full source video after all clips are created
         try:
             source_path.unlink()
         except Exception:
