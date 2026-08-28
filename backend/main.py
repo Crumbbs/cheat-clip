@@ -76,6 +76,16 @@ class VideoAnalysis(BaseModel):
 # API Request/Response Schemas
 # ----------------------------------------------------------------
 
+class ClipRange(BaseModel):
+    title: str = ""
+    start_time: float
+    end_time: float
+
+
+class ExportClipsRequest(BaseModel):
+    url: str
+    clips: List[ClipRange]
+    
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., description="YouTube video URL")
     duration: str = Field("30s", description="Target clip duration: '15s', '30s', or '60s'")
