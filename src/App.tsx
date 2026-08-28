@@ -1280,6 +1280,12 @@ Transcript:
                 </div>
               )}
             </div>
+
+            {subtitlesSource === 'youtube' && (
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', opacity: 0.8, display: 'block', marginTop: '0.15rem', lineHeight: '1.4' }}>
+                💡 <strong>Hosting on Vercel?</strong> Serverless providers can get blocked when fetching auto-generated YouTube transcripts. If auto-fetch fails, download the subtitles manually using <a href="https://downsub.com/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--secondary)', textDecoration: 'underline', fontWeight: '500' }}>downsub.com</a> and upload them using the <strong>Upload Custom Subtitles</strong> option.
+              </span>
+            )}
           </div>
 
           {/* Custom Search Range Section */}
