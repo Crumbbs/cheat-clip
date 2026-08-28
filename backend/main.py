@@ -80,7 +80,7 @@ class AnalyzeRequest(BaseModel):
     url: str = Field(..., description="YouTube video URL")
     duration: str = Field("30s", description="Target clip duration: '15s', '30s', or '60s'")
     api_key: Optional[str] = Field(None, description="Optional custom Gemini API key provided by the user")
-    model: Optional[str] = Field("gemini-2.5-flash", description="Preferred Gemini model name")
+    model: Optional[str] = Field("gemini-3.6-flash", description="Preferred Gemini model name")
     custom_prompt: Optional[str] = Field(None, description="Optional custom focus prompt for clips search")
     range_start: Optional[float] = Field(None, description="Search range start in seconds")
     range_end: Optional[float] = Field(None, description="Search range end in seconds")
@@ -422,7 +422,7 @@ def health_check():
 def list_available_models(api_key: str):
     """Fetches list of available Gemini models using the user's API key."""
     if not api_key or api_key.strip().lower() == "mock":
-        return {"models": ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']}
+        return {"models": ['gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-1.5-flash', 'gemini-1.5-pro']}
     try:
         client = genai.Client(api_key=api_key.strip())
         models_page = client.models.list()
@@ -443,7 +443,7 @@ def list_available_models(api_key: str):
                     if short_name not in model_names:
                         model_names.append(short_name)
         
-        preferred_order = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']
+        preferred_order = ['gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-1.5-flash', 'gemini-1.5-pro']
         sorted_model_names = []
         for pref in preferred_order:
             if pref in model_names:
@@ -458,7 +458,7 @@ def list_available_models(api_key: str):
         return {"models": sorted_model_names}
     except Exception as e:
         logger.error(f"Error listing models: {e}")
-        return {"models": ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro']}
+        return {"models": ['gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-1.5-flash', 'gemini-1.5-pro']}
 
 @app.post("/api/analyze")
 async def analyze_video(request: AnalyzeRequest):
@@ -705,8 +705,8 @@ async def analyze_video(request: AnalyzeRequest):
 
         # ── Step 4: Gemini API call with fallback models and retry ───────────
         client = genai.Client(api_key=gemini_key)
-        requested_model = (request.model or 'gemini-2.5-flash').strip()
-        default_fallbacks = ['gemini-2.5-flash', 'gemini-2.5-pro']
+        requested_model = (request.model or 'gemini-3.6-flash').strip()
+        default_fallbacks = ['gemini-3.6-flash', 'gemini-3.1-pro-preview']
         models_to_try = [requested_model] + [m for m in default_fallbacks if m != requested_model]
         response = None
         last_error = None
